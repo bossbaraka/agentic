@@ -177,9 +177,8 @@ export class AgentOrchestrator {
 
   private async respondToBatch(key: string, batch: NormalizedInbound[], phoneNumberId: string): Promise<void> {
     if (this.busy.has(key)) {
-      // محادثة أخرى قيد المعالجة → نعيد الجدولة بدل الإسقاط
-      log.info(`${key}: معالجة جارية — تأجيل ${batch.length} رسالة`);
-      await sleep(700);
+      // محادثة أخرى قيد المعالجة → نعيد الجدولة بانتظار أطول بدل الإسقاط ورسائل اللوغ المتكررة
+      await sleep(3000);
       for (const m of batch) this.enqueueForReply(key, m);
       return;
     }
