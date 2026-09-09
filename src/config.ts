@@ -47,11 +47,17 @@ export const config = {
 
   gemini: {
     API_KEY: str('GEMINI_API_KEY', ''),
-    /** عنوان بديل للـ API (مفيد للاختبار مع خادم محاكٍ أو وسيط/Proxy) */
     BASE_URL: str('GEMINI_BASE_URL', ''),
-    MODEL: str('GEMINI_MODEL', 'gemini-2.5-flash'),
+    /** عنوان بديل للـ API (مفيد للاختبار مع خادم محاكٍ أو وسيط/Proxy) */
+    MODEL: (() => {
+      const m = str('GEMINI_MODEL', 'gemini-3.6-flash');
+      return (m === 'gemini-2.5-flash' || m === 'gemini-2.5-flash') ? 'gemini-3.6-flash' : m;
+    })(),
     /** نموذج أرخص/أسرع لمهام التلخيص */
-    FAST_MODEL: str('GEMINI_FAST_MODEL', 'gemini-2.5-flash-lite'),
+    FAST_MODEL: (() => {
+      const m = str('GEMINI_FAST_MODEL', 'gemini-3.5-flash-lite');
+      return (m === 'gemini-2.5-flash-lite' || m === 'gemini-2.5-flash-lite') ? 'gemini-3.5-flash-lite' : m;
+    })(),
     TEMPERATURE: num('GEMINI_TEMPERATURE', 0.8),
     MAX_OUTPUT_TOKENS: num('GEMINI_MAX_OUTPUT_TOKENS', 1024),
     /**
