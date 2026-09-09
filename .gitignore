@@ -1,0 +1,11 @@
+node_modules/
+dist/
+data/
+!data/.gitkeep
+.env
+.env.local
+*.log
+.DS_Store
+.cloudflared/
+coverage/
+.tmp/
