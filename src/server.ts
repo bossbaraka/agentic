@@ -96,6 +96,11 @@ orchestrator.onInsight = (i) => writeInsightLog(i);
 
 // ─────────────────── المسارات ───────────────────
 
+/** الصفحة الرئيسية — توجيه تلقائي للوحة التحكم */
+app.get('/', async (_req, reply) => {
+  return reply.redirect(config.server.DASHBOARD_PATH);
+});
+
 /** الصحّة */
 app.get('/health', async () => ({
   ok: true,
