@@ -61,11 +61,25 @@ async function tgCall<T = any>(method: string, params: Record<string, unknown> =
 export async function tgSendText(
   chatId: string,
   body: string,
-  opts: { replyTo?: string; quiet?: boolean } = {},
+  opts: { replyTo?: string; quiet?: boolean; buttons?: { id: string; title: string }[] } = {},
 ): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  const keyboard = (opts.buttons?.length ?? 0) >= 2
+    ? {
+        reply_markup: {
+          inline_keyboard: [
+            opts.buttons!.slice(0, 3).map((b) => ({
+              text: b.title.slice(0, 40),
+              callback_data: (b.id || b.title).slice(0, 64),
+            })),
+          ],
+        },
+      }
+    : {};
+
   if (config.env.DEMO_MODE) {
     if (!opts.quiet) {
-      log.wa(`🟢 تيليجرام [تجربة] → ${chatId} | نص: ${body.slice(0, 300)}`);
+      const extra = opts.buttons?.length ? ` | أزرار: ${opts.buttons.map((b) => b.title).join(' · ')}` : '';
+      log.wa(`🟢 تيليجرام [تجربة] → ${chatId} | نص: ${body.slice(0, 300)}${extra}`);
     }
     return { ok: true, messageId: `tgdemo${Date.now()}` };
   }
@@ -75,23 +89,27 @@ export async function tgSendText(
   let allOk = true;
 
   for (let i = 0; i < parts.length; i++) {
+    const isLast = i === parts.length - 1;
+    const extra = {
+      ...(i === 0 && opts.replyTo ? { reply_to_message_id: Number(opts.replyTo) || opts.replyTo } : {}),
+      ...(isLast ? keyboard : {}),
+    };
     try {
       const msg = await tgCall<any>('sendMessage', {
         chat_id: chatId,
         text: parts[i],
         parse_mode: 'Markdown',
-        ...(i === 0 && opts.replyTo ? { reply_to_message_id: opts.replyTo } : {}),
+        ...extra,
       });
       lastId = String(msg.message_id);
     } catch (err) {
       const msgText = (err as Error).message ?? '';
       if (/parse|entities/i.test(msgText)) {
-        // صيغة Markdown فشلت → إعادة إرسال نص عادي
         try {
           const msg = await tgCall<any>('sendMessage', {
             chat_id: chatId,
             text: parts[i],
-            ...(i === 0 && opts.replyTo ? { reply_to_message_id: opts.replyTo } : {}),
+            ...extra,
           });
           lastId = String(msg.message_id);
         } catch (err2) {
@@ -107,6 +125,16 @@ export async function tgSendText(
   }
 
   return { ok: allOk, messageId: lastId, error: allOk ? undefined : 'telegram_send_failed' };
+}
+
+/** إيقاف دائرة التحميل على الزر بعد الضغط */
+export async function tgAnswerCallback(callbackId: string, text?: string): Promise<void> {
+  if (config.env.DEMO_MODE || !callbackId) return;
+  try {
+    await tgCall('answerCallbackQuery', { callback_query_id: callbackId, ...(text ? { text } : {}) });
+  } catch {
+    /* غير حرج */
+  }
 }
 
 /** مؤشر "يكتب…" (فعّال 5 ثوانٍ في تيليجرام) */
@@ -233,7 +261,7 @@ export async function startTelegramPolling(onUpdate: (u: any) => void): Promise<
         const updates = await tgCall<any[]>('getUpdates', {
           offset,
           timeout: 30,
-          allowed_updates: ['message'],
+          allowed_updates: ['message', 'callback_query', 'edited_message'],
         });
         for (const u of updates ?? []) {
           offset = Math.max(offset, (u.update_id ?? 0) + 1);
@@ -261,7 +289,7 @@ export function stopTelegramPolling(): void {
 // ─────────────────────── webhook ───────────────────────
 
 export async function setTelegramWebhook(publicUrl: string, secret: string): Promise<void> {
-  await tgCall('setWebhook', { url: publicUrl, secret_token: secret, allowed_updates: ['message'] });
+  await tgCall('setWebhook', { url: publicUrl, secret_token: secret, allowed_updates: ['message', 'callback_query'] });
   log.ok(`🟢 تيليجرام: webhook مضبوط على ${publicUrl}`);
 }
 

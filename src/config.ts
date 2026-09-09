@@ -52,7 +52,7 @@ export const config = {
     MODEL: str('GEMINI_MODEL', 'gemini-2.5-flash'),
     /** نموذج أرخص/أسرع لمهام التلخيص */
     FAST_MODEL: str('GEMINI_FAST_MODEL', 'gemini-2.5-flash-lite'),
-    TEMPERATURE: num('GEMINI_TEMPERATURE', 0.7),
+    TEMPERATURE: num('GEMINI_TEMPERATURE', 0.8),
     MAX_OUTPUT_TOKENS: num('GEMINI_MAX_OUTPUT_TOKENS', 1024),
     /**
      * ميزانية "التفكير" للنموذج:

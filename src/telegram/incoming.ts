@@ -18,6 +18,38 @@ import type { NormalizedInbound } from '../whatsapp/types.js';
  * }
  */
 export function parseTelegramUpdate(u: any): NormalizedInbound | null {
+  // ضغط زر تفاعلي
+  if (u?.callback_query) {
+    const cq = u.callback_query;
+    const chat = cq.message?.chat ?? {};
+    const from = cq.from ?? {};
+    const chatId = String(chat.id ?? from.id ?? '');
+    if (!chatId) return null;
+    const data = String(cq.data ?? '');
+    let title = data;
+    for (const row of cq.message?.reply_markup?.inline_keyboard ?? []) {
+      for (const b of row ?? []) {
+        if (String(b.callback_data) === data) title = String(b.text ?? data);
+      }
+    }
+    const contactName =
+      [from.first_name, from.last_name].filter(Boolean).join(' ') ||
+      (from.username ? `@${from.username}` : `TG-${chatId}`);
+    return {
+      channel: 'tg',
+      waId: `tgcb${u.update_id ?? cq.id ?? Date.now()}`,
+      from: `tg:${chatId}`,
+      phoneNumberId: 'telegram',
+      contactName,
+      type: 'interactive',
+      timestamp: Date.now(),
+      forwarded: false,
+      body: title,
+      reply: { id: data, title },
+      raw: cq as Record<string, unknown>,
+    };
+  }
+
   const msg = u?.message ?? u?.edited_message;
   const chat = msg?.chat;
   if (!msg || !chat) return null;

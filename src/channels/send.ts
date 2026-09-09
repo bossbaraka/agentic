@@ -3,6 +3,7 @@ import { log } from '../lib/utils.js';
 import {
   markReadAndTyping as waMarkReadAndTyping,
   notifyHumanAgent as waNotifyHuman,
+  sendButtons as waSendButtons,
   sendReaction as waSendReaction,
   sendText as waSendText,
 } from '../whatsapp/outgoing.js';
@@ -13,6 +14,7 @@ import {
   tgSendText,
   tgSendTyping,
 } from '../telegram/client.js';
+import type { QuickReply } from '../agent/personality.js';
 
 /**
  * مُوجّه قنوات: نفس الوظائف عبر واتساب أو تيليجرام.
@@ -31,20 +33,31 @@ const tgChatId = (key: string): string => key.slice(3);
 /** واتساب معطّل فعليًا؟ (في وضع التجربة المحاكاة المحلية مسموحة دائمًا) */
 const waDisabled = (): boolean => !config.whatsapp.ENABLED && !config.env.DEMO_MODE;
 
-/** إرسال نص (يُقسَّم تلقائيًا حسب حد القناة) */
+/** إرسال نص (يُقسَّم تلقائيًا حسب حد القناة) — مع أزرار اختيار اختيارية */
 export async function sendOutbound(
   key: string,
   body: string,
-  opts: { contextMessageId?: string } = {},
+  opts: { contextMessageId?: string; buttons?: QuickReply[] } = {},
 ): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  const buttons = (opts.buttons ?? []).slice(0, 3);
   if (isTgKey(key)) {
-    return tgSendText(tgChatId(key), body, { replyTo: opts.contextMessageId });
+    return tgSendText(tgChatId(key), body, { replyTo: opts.contextMessageId, buttons });
   }
   if (waDisabled()) {
     log.warn(`⏸ واتساب موقوف — تعذّر الإرسال إلى ${key}`);
     return { ok: false, error: 'whatsapp_disabled' };
   }
+  if (buttons.length >= 2) {
+    const r = await waSendButtons(key, body, buttons.map((b) => ({ id: b.id, title: b.title })));
+    if (r.ok) return r;
+    log.warn('تعذّر إرسال الأزرار — إسقاط إلى نص عادي');
+  }
   return waSendText(key, body, { contextMessageId: opts.contextMessageId });
+}
+
+/** تجديد مؤشر «يكتب…» أثناء الردود المتعددة */
+export async function sendTyping(key: string): Promise<void> {
+  if (isTgKey(key)) await tgSendTyping(tgChatId(key));
 }
 
 /** تفاعل إيموجي على رسالة العميل (واتساب فقط — لا مقابل له في تيليجرام) */
