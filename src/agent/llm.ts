@@ -91,8 +91,9 @@ function normalizeTurns(turns: Turn[]): Turn[] {
     }
   }
 
-  // يجب أن يبدأ السجل بدور user
+  // يجب أن يبدأ وينتهي السجل بدور user
   while (out.length && out[0].role === 'model') out.shift();
+  while (out.length && out[out.length - 1].role === 'model') out.pop();
 
   return out;
 }
