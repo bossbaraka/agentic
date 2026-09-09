@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: mureeh-ai-agent
+    env: node
+    region: singapore
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEMO_MODE
+        value: false
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
+      - key: GEMINI_FAST_MODEL
+        value: gemini-3.5-flash-lite
+      - key: BOT_MODE
+        value: business
+      - key: WHATSAPP_ENABLED
+        value: true
