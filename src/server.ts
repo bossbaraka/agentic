@@ -16,6 +16,7 @@ import {
   startTelegramPolling,
   stopTelegramPolling,
   telegramEnabled,
+  tgAnswerCallback,
   verifyTelegramSecret,
 } from './telegram/client.js';
 import { getDashboardHtml } from './dashboard/index.js';
@@ -178,7 +179,9 @@ if (telegramEnabled()) {
     reply.code(200).send({ ok: true });
     setImmediate(async () => {
       try {
-        const msg = parseTelegramUpdate(req.body as any);
+        const body = req.body as any;
+        if (body?.callback_query?.id) void tgAnswerCallback(String(body.callback_query.id));
+        const msg = parseTelegramUpdate(body);
         if (msg) await orchestrator.handleInbound(msg);
         else log.warn('تحديث تيليجرام غير مدعوم — تم تجاهله');
       } catch (err) {
@@ -361,6 +364,7 @@ async function main() {
         .catch((e: Error) => log.warn(`تعذّر ضبط webhook تيليجرام: ${e.message}`));
     } else {
       startTelegramPolling((u) => {
+        if (u?.callback_query?.id) void tgAnswerCallback(String(u.callback_query.id));
         const msg = parseTelegramUpdate(u);
         if (msg) void orchestrator.handleInbound(msg);
         else log.warn('تحديث تيليجرام غير مدعوم — تم تجاهله');

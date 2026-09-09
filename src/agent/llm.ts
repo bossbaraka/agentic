@@ -4,6 +4,15 @@ import { extractJson, log, retry, sanitizeForJson, sleep } from '../lib/utils.js
 import type { MediaPart } from '../types.js';
 import { TOOL_DECLARATIONS, runTool, type ToolContext, type ToolResult } from './tools.js';
 import { getPlan, MUREEH_PLANS, recommendPlan } from './plans.js';
+import {
+  clampButtons,
+  dayPart,
+  fallbackQuickReplies,
+  firstNameOf,
+  greetingWord,
+  isAffirmative,
+  type QuickReply,
+} from './personality.js';
 
 /**
  * محرك الذكاء: يغلّف Gemini ويحوّل الرد الخام إلى بنية مضبوطة.
@@ -36,6 +45,8 @@ export interface AgentOutput {
   reason?: string;
   intent?: string;
   sentiment?: 'positive' | 'neutral' | 'negative';
+  /** أزرار سريعة تُرسل مع آخر جزء (واتساب/تيليجرام) */
+  quickReplies: QuickReply[];
   toolsCalled: { name: string; args: Record<string, unknown>; result: unknown }[];
   /** إجراءات جانبية تطلبها الأدوات (تنبيه بشري، إرسال ملف...) */
   sideEffects: { kind: string; payload: Record<string, unknown>; tool: string }[];
@@ -106,6 +117,17 @@ interface ParsedReply {
   reason?: string;
   intent?: string;
   sentiment?: 'positive' | 'neutral' | 'negative';
+  quickReplies: QuickReply[];
+}
+
+function parseQuickReplies(raw: unknown): QuickReply[] {
+  if (!Array.isArray(raw)) return [];
+  return clampButtons(
+    raw.map((b: any) => ({
+      id: String(b?.id ?? b?.payload ?? ''),
+      title: String(b?.title ?? b?.text ?? ''),
+    })),
+  );
 }
 
 function parseAgentJson(text: string): ParsedReply {
@@ -114,7 +136,6 @@ function parseAgentJson(text: string): ParsedReply {
   if (json && typeof json === 'object' && !Array.isArray(json)) {
     const o = json as Record<string, any>;
 
-    // الحالة النظامية
     let rawParts = o.reply_parts ?? o.replyParts ?? o.reply ?? o.response ?? o.parts;
     if (typeof rawParts === 'string') rawParts = [rawParts];
     if (!Array.isArray(rawParts)) rawParts = [];
@@ -131,18 +152,25 @@ function parseAgentJson(text: string): ParsedReply {
       reason: typeof o.handoff_reason === 'string' ? o.handoff_reason : undefined,
       intent: typeof o.intent === 'string' ? o.intent : undefined,
       sentiment: ['positive', 'neutral', 'negative'].includes(o.sentiment) ? o.sentiment : undefined,
+      quickReplies: parseQuickReplies(o.quick_replies ?? o.quickReplies ?? o.buttons),
     };
   }
 
   if (Array.isArray(json)) {
     const parts = json.map((x: any) => (typeof x === 'string' ? x : String(x))).filter(Boolean);
-    return { ok: true, parts, handoff: false };
+    return { ok: true, parts, handoff: false, quickReplies: [] };
   }
 
-  // النموذج تجاهل صيغة JSON — نتعامل مع النص كما هو (أفضل من الفشل)
   const fallback = sanitizeForJson(text).trim();
-  if (!fallback) return { ok: false, parts: [], handoff: false };
-  return { ok: false, parts: [fallback], handoff: false };
+  if (!fallback) return { ok: false, parts: [], handoff: false, quickReplies: [] };
+  return { ok: false, parts: [fallback], handoff: false, quickReplies: [] };
+}
+
+function finishOutput(partial: Omit<AgentOutput, 'quickReplies'> & { quickReplies?: QuickReply[] }): AgentOutput {
+  const qr = partial.quickReplies?.length
+    ? clampButtons(partial.quickReplies)
+    : fallbackQuickReplies(partial.intent);
+  return { ...partial, quickReplies: qr };
 }
 
 // ─────────────────────────── المحرك ───────────────────────────
@@ -153,14 +181,12 @@ function getClient(): GoogleGenAI {
   if (!client) {
     client = new GoogleGenAI({
       apiKey: config.gemini.API_KEY,
-      // BASE_URL يسمح بالاختبار ضد خادم محاكٍ أو تمرير الطلبات عبر وسيط
       ...(config.gemini.BASE_URL ? { httpOptions: { baseUrl: config.gemini.BASE_URL } } : {}),
     } as any);
   }
   return client;
 }
 
-/** استدعاء واحد مع مهلة زمنية */
 async function callGemini(
   contents: GeminiContent[],
   systemInstruction: string,
@@ -183,7 +209,6 @@ async function callGemini(
   if (toolsEnabled) {
     params.config.tools = TOOL_DECLARATIONS as any;
   } else if (config.gemini.JSON_MODE) {
-    // بدون أدوات → نفرض JSON لتقليل أخطاء التحليل
     params.config.responseMimeType = 'application/json';
   }
 
@@ -209,7 +234,6 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
 
   const turns = normalizeTurns(input.turns);
 
-  // حقن سياق إضافي في آخر رسالة مستخدم
   if (input.extraContext && turns.length) {
     const last = turns[turns.length - 1];
     if (last.role === 'user') last.text = `${input.extraContext}\n\n${last.text}`;
@@ -222,8 +246,7 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
   let promptTokens = 0;
   let candidatesTokens = 0;
   let finalText = '';
-  /** رسالة جاهزة من أداة تُرسل للعميل مباشرة دون انتظار صياغة النموذج */
-  let directToolMessages: string[] = [];
+  const toolFallbacks: string[] = [];
 
   const MAX_TOOL_LOOPS = 4;
 
@@ -235,7 +258,6 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
         label: 'استدعاء Gemini',
         shouldRetry: (err) => {
           const msg = (err as Error).message ?? '';
-          // لا تُعِد المحاولة على أخطاء الصلاحية/المحتوى
           if (/API key not valid|PERMISSION_DENIED|INVALID_ARGUMENT/i.test(msg)) return false;
           return true;
         },
@@ -245,31 +267,29 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
     promptTokens += response?.usageMetadata?.promptTokenCount ?? 0;
     candidatesTokens += response?.usageMetadata?.candidatesTokenCount ?? 0;
 
-    // ── حظر أمان / لا يوجد رد ──
     const finish = response?.candidates?.[0]?.finishReason;
     if (finish && finish !== 'STOP' && finish !== 'MAX_TOKENS') {
       const blockReason = response?.promptFeedback?.blockReason;
       log.warn(`النموذج أنهى الرد بسبب: ${finish}${blockReason ? ` / ${blockReason}` : ''}`);
       if (finish === 'SAFETY' || blockReason) {
-        return {
-          parts: ['عذرًا، ما قدرت أعالج هذي الرسالة. ممكن توضح طلبك بطريقة أخرى؟'],
+        return finishOutput({
+          parts: ['عذرًا، ما قدرت أعالج هذي الرسالة. ممكن توضح طلبك بطريقة ثانية؟ أنا معك.'],
           handoff: false,
+          intent: 'عام',
           toolsCalled,
           sideEffects,
           usage: { promptTokens, candidatesTokens },
           model: config.gemini.MODEL,
           engine: 'gemini',
           rawText: `[finishReason=${finish}]`,
-        };
+        });
       }
     }
 
     const parts = response?.candidates?.[0]?.content?.parts ?? [];
     const functionCalls = parts.filter((p: any) => p?.functionCall?.name);
 
-    // ── هناك استدعاء دوال → نفّذها وأعد الكرة ──
     if (functionCalls.length > 0) {
-      // نعيد للنموذج أجزاءه كما هي (بما فيها functionCall) — مطلوب في الدورة التالية
       contents.push({
         role: 'model',
         parts: parts.map((p: any) => stripThought(p)).filter((p: any) => p.text !== ''),
@@ -284,9 +304,15 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
         const result: ToolResult = await runTool(name, args, input.toolContext);
         toolsCalled.push({ name, args, result: result.data });
 
-        // النتيجة تُعاد للنموذج داخل functionResponse
         fnResponses.push({
-          functionResponse: { name, response: { ok: result.ok, result: result.data } },
+          functionResponse: {
+            name,
+            response: {
+              ok: result.ok,
+              result: result.data,
+              ...(result.userMessage ? { suggested_copy: result.userMessage } : {}),
+            },
+          },
         });
 
         if (result.sideEffect) {
@@ -294,16 +320,7 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
           log.tool(`إجراء جانبي من ${name}: ${result.sideEffect.kind}`);
         }
 
-        // لو الأداة أنتجت رسالة جاهزة للعميل، نعتبرها الرد النهائي ونخرج من الحلقة.
-        // هذا يوفّر استدعاءً إضافيًا ويضمن دقة الأرقام والمراجع في الرسالة.
-        if (result.userMessage && result.userMessage.trim()) {
-          directToolMessages.push(result.userMessage.trim());
-        }
-      }
-
-      if (directToolMessages.length) {
-        finalText = '';
-        break;
+        if (result.userMessage?.trim()) toolFallbacks.push(result.userMessage.trim());
       }
 
       contents.push({ role: 'user', parts: fnResponses });
@@ -311,7 +328,6 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
       continue;
     }
 
-    // ── لا استدعاءات → هذا هو الرد النهائي ──
     const texts = parts
       .filter((p: any) => typeof p?.text === 'string' && !p?.thought)
       .map((p: any) => p.text as string);
@@ -320,56 +336,40 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
     break;
   }
 
-  // لو خرجنا برسالة جاهزة من أداة → نرسلها مباشرة (مع أي رسالة إضافية من النموذج)
-  if (directToolMessages.length) {
-    const parts = directToolMessages.slice(0, config.bot.MAX_REPLY_PARTS + 1);
-    return {
-      parts,
-      handoff: toolsCalled.some((t) => t.name === 'create_ticket'),
-      reason: toolsCalled.find((t) => t.name === 'create_ticket') ? 'أداة create_ticket' : undefined,
-      intent: toolsCalled[0]?.name,
-      sentiment: 'neutral',
-      toolsCalled,
-      sideEffects,
-      usage: { promptTokens, candidatesTokens },
-      model: config.gemini.MODEL,
-      engine: 'gemini',
-      rawText: `[tool-direct] ${toolsCalled.map((t) => t.name).join(', ')}`,
-    };
-  }
-
   const parsed = parseAgentJson(finalText);
 
-  let parts = parsed.parts;
+  let outParts = parsed.parts;
 
-  // لو النموذج أرجع أجزاء أكثر من الحد → ادمج الزائد في الأخير
-  if (parts.length > config.bot.MAX_REPLY_PARTS) {
-    parts = [
-      ...parts.slice(0, config.bot.MAX_REPLY_PARTS - 1),
-      parts.slice(config.bot.MAX_REPLY_PARTS - 1).join('\n'),
+  if (outParts.length > config.bot.MAX_REPLY_PARTS) {
+    outParts = [
+      ...outParts.slice(0, config.bot.MAX_REPLY_PARTS - 1),
+      outParts.slice(config.bot.MAX_REPLY_PARTS - 1).join('\n'),
     ];
   }
 
-  if (parts.length === 0 && !parsed.handoff) {
-    parts = ['وصلتني رسالتك 👍 كيف أقدر أخدمك؟'];
+  if (outParts.length === 0) {
+    if (toolFallbacks.length) outParts = toolFallbacks.slice(0, config.bot.MAX_REPLY_PARTS);
+    else if (!parsed.handoff) outParts = ['وصلتني رسالتك 👍 كيف أقدر أخدمك؟'];
   }
 
-  return {
-    parts,
-    handoff: parsed.handoff,
-    reason: parsed.reason,
+  const supportTicket = toolsCalled.some((t) => t.name === 'create_support_ticket');
+
+  return finishOutput({
+    parts: outParts,
+    handoff: parsed.handoff || supportTicket,
+    reason: parsed.reason ?? (supportTicket ? 'تذكرة دعم فُتحت — متابعة بشرية' : undefined),
     intent: parsed.intent,
     sentiment: parsed.sentiment,
+    quickReplies: parsed.quickReplies,
     toolsCalled,
     sideEffects,
     usage: { promptTokens, candidatesTokens },
     model: config.gemini.MODEL,
     engine: 'gemini',
     rawText: finalText,
-  };
+  });
 }
 
-/** حذف أجزاء "التفكير" من رد النموذج قبل إعادتها في السجل */
 function stripThought(part: any): any {
   if (part?.thought) return { text: '' };
   if (typeof part?.text === 'string') return { text: part.text };
@@ -377,7 +377,6 @@ function stripThought(part: any): any {
   return part;
 }
 
-/** تلخيص محادثة طويلة باستخدام النموذج السريع */
 export async function summarizeConversation(history: string, existingSummary: string, promptBuilder: (s: string) => string): Promise<string> {
   if (!config.gemini.API_KEY) return existingSummary || 'لا يوجد ملخص (وضع التجربة).';
 
@@ -412,18 +411,25 @@ export async function summarizeConversation(history: string, existingSummary: st
 
 // ─────────────────────────── محرك التجربة (بدون مفتاح) ───────────────────────────
 
+function nameFromPrompt(systemPrompt: string): string {
+  const m = systemPrompt.match(/اسم العميل في واتساب:\s*([^\n]+)/);
+  return firstNameOf(m?.[1]?.trim() ?? '');
+}
+
 /**
- * يعمل بدون GEMINI_API_KEY حتى تقدر تجرب المسار الكامل:
- * webhook → تحليل → جلسة → تقسيم رد → إرسال → لوحة التحكم.
- * الردود هنا قواعد بسيطة مخصصة لمنصة مُريح، ليست ذكاءً حقيقيًا.
+ * يعمل بدون GEMINI_API_KEY حتى تقدر تجرب المسار الكامل.
+ * الردود قواعد بسيطة — لكن بنفس نبرة الإنسان المتحمّس، لا سكربت جاف.
  */
-function mockReply(input: AgentInput, started: number): AgentOutput {
+function mockReply(input: AgentInput, _started: number): AgentOutput {
   const lastUser = [...input.turns].reverse().find((t) => t.role === 'user');
-  const text = (lastUser?.text ?? '').toLowerCase();
+  const raw = lastUser?.text ?? '';
+  const text = raw.toLowerCase();
   const hasMedia = Boolean(lastUser?.media?.length);
   const lastModelText = [...input.turns].reverse().find((t) => t.role === 'model')?.text ?? '';
-  /** هل آخر رد للبوت طلب بيانات التفعيل؟ (عشان نميّز "رد على سؤال" عن "رسالة أولى") */
-  const contextWantsDetails = /أرسل لي: اسمك|أجهز لك التفعيل|أجهز التفعيل|تبيني أجهز/.test(lastModelText);
+  const name = nameFromPrompt(input.systemPrompt);
+  const vocative = name ? `${name}، ` : '';
+  const askedActivation = /أجهّز لك التفعيل|أجهز لك التفعيل|أجهز التفعيل|تبيني أجه|خلّينا نجه|شو اسمك|أرسل لي: اسمك/.test(lastModelText);
+  const askedName = /شو اسمك|ما اسمك|اسمك\؟/.test(lastModelText);
 
   const parts: string[] = [];
   let handoff = false;
@@ -438,113 +444,123 @@ function mockReply(input: AgentInput, started: number): AgentOutput {
       return `• *${p.name}* — *${p.priceMonthly} ₪/شهر* (${short})${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`;
     }).join('\n');
 
-  // 1) طلب محادثة بشرية
-  if (/بشري|انسان|إنسان|موظف|وكيل|agent|human|شخص حقيقي|تحداك/.test(text)) {
+  // أزرار شائعة
+  const click = /الأسعار والباقات|أنصحني بباقة|أبدأ التفعيل|جهز لي التفعيل|الأساسية|الاحترافية|المؤسسات|qr:/.test(text);
+
+  if (/بشري|انسان|إنسان|موظف|وكيل|agent|human|شخص حقيقي|أريد موظف/.test(text)) {
     intent = 'طلب_تحويل';
     handoff = true;
-    parts.push('أكيد، بربطك مع أحد زملائنا 👤');
-    parts.push('فريقنا سيتابع معك في أقرب وقت. شكرًا لصبرك.');
-  }
-  // 2) غضب/استرداد
-  else if (/سيئة|زعلان|مقرف|استرداد|ارجع فلوسي|أرجع فلوسي|تراجع|كارثة|افظع|terrible|awful|refund/.test(text)) {
+    parts.push(`${vocative}أكيد، بوصلك بأحد الزملاء الحين.`);
+    parts.push('فريقنا يكمل معك بأقرب وقت. وأنا هنا لو احتجت شيء بعدين.');
+  } else if (/سيئة|زعلان|مقرف|استرداد|ارجع فلوسي|أرجع فلوسي|كارثة|فظيع|terrible|awful|refund/.test(text)) {
     intent = 'شكوى';
     handoff = true;
-    parts.push('أنا آسف فعلًا — هذا ليس الوضع الذي يجب أن تصل إليه تجربة مطعمك 🙏');
-    parts.push('أرسلت موضوعك للفريق ليتابع معك شخصيًا ويحلّه، وسيصلك رد قريبًا.');
-  }
-  // 3) مشكلة تقنية لدى مشترك
-  else if (/مشكلة|مش شغالة|ما تشتغل|ما تشتغل|error|طبي|تقني|مش عارف ادخل|لا تظهر|متوقف|تنبيهات/.test(text)) {
+    parts.push('أنا آسف فعلًا — هذا مو الوضع اللي يستحقه مطعمك.');
+    parts.push('أرسلت موضوعك للفريق يتابع معك شخصيًا ويحلّه. سيصلك رد قريبًا.');
+  } else if (/مشكلة|مش شغالة|ما تشتغل|error|تقني|مش عارف ادخل|لا تظهر|متوقف|تنبيهات/.test(text)) {
     intent = 'دعم_تقني';
     handoff = true;
-    parts.push('واضح، وافتحت لك متابعة فورية مع الفريق الفني 🎫');
-    parts.push('أرسل لي اسم المطعم (وصورة للشاشة لو تقدر — تسرّع الحل). الزميل سيتواصل معك مباشرة.');
-  }
-  // 4) تحية
-  else if (/سلام|مرحبا|هلا|اهلا|hi|hello|صباح|مساء/.test(text) && text.length < 60) {
+    parts.push('واضح، وما المفروض يصير هذا عندك.');
+    parts.push('فتحت متابعة فورية للفريق الفني. اسم المطعم عشان نسرّعها؟ وصورة للشاشة لو تقدر.');
+  } else if (/روبوت|ذكاء اصطناعي|ai\b|انت بوت|أنت بوت/.test(text)) {
+    intent = 'عام';
+    parts.push('أنا مساعد الفريق هنا على الدردشة، والزملاء البشريين معي لو احتجتهم 🙂');
+    parts.push('تحب نمرّ على الباقات ولا أجهّز لك تفعيل؟');
+  } else if (/كيفك|كيف حالك|شخبارك|عامل ايه|whats up/.test(text)) {
     intent = 'تحية';
-    parts.push(`أهلًا وسهلًا 👋 أنا ${config.bot.BOT_NAME} — منصة مُريح لإدارة المطاعم: منيو QR، شاشة مطبخ حية، ونقطة بيع.`);
-    parts.push('كم طاولة عندك في مطعمك؟ أحسب لك الأنسب.');
-  }
-  // 5) البوت طلب بيانات التفعيل والعميل ردّ بها → تأكيد
-  else if (contextWantsDetails && (/اسمي|المطعم|مقهى|كافيه|مطعمي/.test(text) || /\d/.test(text))) {
+    parts.push(`${vocative}تمام والحمد لله، وأنت؟ 🙌 خلينا نفيد مطعمك: كم طاولة تشتغل عندك؟`);
+  } else if ((/سلام|مرحبا|هلا|اهلا|أهلًا|hi\b|hello|hey|صباح|مساء/.test(text) && text.length < 80) || click && /هلا|hi/.test(text)) {
+    intent = 'تحية';
+    const g = greetingWord(dayPart());
+    parts.push(`${g}${name ? ` ${name}` : ''} 👋 أنا ${config.bot.BOT_NAME} — منيو QR، شاشة مطبخ حية، وكاشير من الرمز على الطاولة.`);
+    parts.push('كم طاولة تشتغل عندك؟ أحسب لك الباقة اللي تفرق معك فعلًا.');
+  } else if (askedName && raw.trim().split(/\s+/).length <= 4 && !/سعر|باقة/.test(text)) {
+    intent = 'طلب_تفعيل';
+    parts.push(`تسلم${name ? ' ' + name : ''}. واسم المطعم؟`);
+  } else if (askedActivation && (isAffirmative(raw) || /اسمي|المطعم|مقهى|كافيه|مطعمي/.test(text) || /\d/.test(text))) {
     intent = 'بيانات_تفعيل';
-    parts.push('✅ وصلتني طلبك للتفعيل. فريق مُريح يتواصل معك الآن لاستكمال التجهيز — يتم خلال دقائق وبدون بطاقة ائتمانية للبدء 🚀');
-  }
-
-  // 6) ذكر عدد طاولات → توصية فورية
-  else {
+    if (isAffirmative(raw) && !/\d/.test(text) && !/مطعم|مقهى/.test(text)) {
+      parts.push('يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
+      intent = 'طلب_تفعيل';
+    } else {
+      parts.push(`✅ وصلت التفاصيل${name ? ' يا ' + name : ''}. فريق مُريح يتواصل معك الآن لاستكمال التجهيز — خلال دقائق عادة وبدون بطاقة ائتمانية للبدء 🚀`);
+    }
+  } else {
     const m = text.match(/(\d{1,3})\s*(?:طاولة|طاولات|طاو|table)/);
     if (m) {
       intent = 'توصية_باقة';
       const tables = Number(m[1]);
       const rec = recommendPlan({ tables });
       const p = rec.plan;
-      parts.push(`لمطعم *${tables} طاولة* أنصح بـ*${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' (الأكثر طلبًا)' : ''}.`);
-      parts.push(`السبب: ${rec.reason}. والدفع السنوي يوفر ${p.yearlySavings} ₪. تبيني أجهز لك التفعيل؟`);
+      parts.push(`لـ*${tables} طاولة* أنصح بـ*${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' (الأكثر طلبًا)' : ''}.`);
+      parts.push(`${rec.reason}. والدفع السنوي يوفّر *${p.yearlySavings} ₪*. تبيني أجهّز لك التفعيل؟`);
     }
   }
 
-  // 6) طلب تفعيل اشتراك (يجب أن يسبق فروع "شكر" و"باقات" لأن "تمام" قد يخلطها)
-  if (parts.length === 0 && /اشترك|أشترك|اشتراك|أشترك|تفعيل|أبدأ|ابدأ|subscribe|contract/.test(text)) {
+  if (parts.length === 0 && (/أبدأ التفعيل|جهز لي التفعيل|qr:activate/.test(text) || /اشترك|أشترك|اشتراك|تفعيل|أبدأ|ابدأ|نبدأ|يلا|subscribe/.test(text))) {
     intent = 'طلب_تفعيل';
     const isQuestion = /كيف|وش|هل|متى|متي|لماذا|why|how/.test(text);
     const words = text.trim().split(/\s+/).length;
-    const hasDetails = words >= 6 || (/\d/.test(text) && /مطعم|مقهى|كافيه|كافيه/.test(text));
+    const hasDetails = words >= 6 || (/\d/.test(text) && /مطعم|مقهى|كافيه/.test(text));
     if (isQuestion) {
       parts.push('التفعيل خلال دقائق عادةً، وبدون بطاقة ائتمانية للبدء 🚀');
-      parts.push('المسار 4 خطوات: معلومات المطعم ← الهوية والألوان ← الطاولات والباقة ← التدشين. والفريق يساعدك خطوة بخطوة.');
-      parts.push('تبيني نبدأ؟ أرسل لي: اسمك، اسم المطعم، المدينة، وعدد الطاولات.');
+      parts.push('أربع خطوات بسيطة والفريق معك فيها. تبيني نبدأ؟ شو اسمك؟');
     } else if (hasDetails) {
-      parts.push('✅ وصلتني طلبك للتفعيل. فريق مُريح يتواصل معك الآن لاستكمال التجهيز — يتم خلال دقائق وبدون بطاقة ائتمانية للبدء 🚀');
+      parts.push('✅ وصلتني طلبك. الفريق يتواصل معك الآن لاستكمال التجهيز — خلال دقائق وبدون بطاقة للبدء 🚀');
     } else {
-      parts.push('أبشر، نجهز التفعيل 🎉');
-      parts.push('أرسل لي: اسمك، اسم المطعم، المدينة، وعدد الطاولات — وأسجل طلبك فورًا.');
+      parts.push('يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
     }
   }
 
-  // 7) باقة المؤسسات/فروع
-  if (parts.length === 0 && /فروع|سلسلة|سلاسل|enterprise|chain/.test(text)) {
+  if (parts.length === 0 && (/فروع|سلسلة|سلاسل|enterprise|chain|المؤسسات 799|qr:enterprise/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('enterprise');
-    parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* (${p.priceYearlyPerMonth} ₪ عند الدفع السنوي):`);
+    parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* (≈ ${p.priceYearlyPerMonth} ₪ عند السنوي):`);
     parts.push(p.features.map((f) => `• ${f}`).join('\n'));
     parts.push('كم فرعًا عندك حاليًا؟');
   }
 
-  // 8) الباقة الاحترافية
-  if (parts.length === 0 && /احتراف|pro|kds|مطبخ|pos/.test(text)) {
+  if (parts.length === 0 && (/احتراف|pro|kds|مطبخ|pos|الاحترافية 299|qr:pro/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('pro');
-    parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* (${p.priceYearlyPerMonth} ₪ عند الدفع السنوي):`);
+    parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* ← الأكثر طلبًا.`);
     parts.push(p.features.map((f) => `• ${f}`).join('\n'));
-    parts.push('تبي أجهز لك التفعيل؟');
+    parts.push('تبيني أجهّز لك التفعيل؟');
   }
 
-  // 9) استفسار أسعار عام
-  if (parts.length === 0 && /سعر|أسعار|اسعار|بكم|تكلف|باقة|باقات|price|plan|package/.test(text)) {
+  if (parts.length === 0 && (/أساسية|starter|الأساسية 149|qr:starter/.test(text))) {
+    intent = 'استفسار_باقات';
+    const p = getPlan('starter');
+    parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر*. بداية نظيفة لمنيو QR وكاشير واستدعاء نادل.`);
+    parts.push('تقدر ترقّي في أي وقت من اللوحة. كم طاولة عندك؟');
+  }
+
+  if (parts.length === 0 && (/سعر|أسعار|اسعار|بكم|تكلف|باقة|باقات|price|plan|package|الأسعار والباقات|qr:prices|أنصحني/.test(text))) {
     intent = 'استفسار_أسعار';
-    parts.push(`عندنا 3 باقات، كلها بدون عقود وبدون رسوم مخفية:\n${planList()}\n\nالدفع السنوي يوفر شهرين (~17%).`);
-    parts.push('كم طاولة عندك في مطعمك؟ أحسب لك الأنسب.');
+    parts.push(`ثلاث باقات، بدون عقود وبدون رسوم مخفية:\n${planList()}\n\nالدفع السنوي يوفّر شهرين كاملين.`);
+    parts.push('كم طاولة تشتغل عندك؟ أحسب لك الأنسب.');
   }
 
-  // 10) شكر/إيجاب
-  if (parts.length === 0 && /شكرا|شكرًا|تمام|ممتاز|رائع|تقبلك|thanks|great|awesome/.test(text)) {
+  if (parts.length === 0 && askedActivation && isAffirmative(raw)) {
+    intent = 'طلب_تفعيل';
+    parts.push('يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
+  }
+
+  if (parts.length === 0 && /شكرا|شكرًا|تمام|ممتاز|رائع|thanks|great|awesome/.test(text)) {
     intent = 'إيجابي';
-    parts.push('العفو! 🙌 أي سؤال ثاني عن الباقات أو التفعيل أنا هنا.');
+    parts.push(`العفو${name ? ' ' + name : ''} 🙌 أي سؤال ثاني عن الباقات أو التفعيل، أنا هنا.`);
   }
 
-  // 11) وسائط
   if (parts.length === 0 && hasMedia) {
     intent = 'وسائط';
-    parts.push('وصلتني الوسائط التي أرسلتها ✅');
-    parts.push('في وضع التجربة ما أقدر أحلل الصور/الصوت. اضبط GEMINI_API_KEY لتفعيل الفهم الكامل.');
+    parts.push('وصلتني، وشفت المرفق ✅');
+    parts.push('خبّرني: هذي منيو، شاشة مطبخ، ولا شيء ثاني؟ وأنا أربطها لك بالحل المناسب.');
   }
 
-  // 12) افتراضي
   if (parts.length === 0) {
     intent = 'عام';
-    parts.push('وصلني رسالتك 👌 أقدر أجاوبك عن الباقات والأسعار، وأجهز لك تفعيل الاشتراك، وأتابع أي مشكلة تقنية لديك.');
-    parts.push(`⚙️ هذا *محرك تجربة* — اضبط GEMINI_API_KEY في .env لتفعيل ردود ${config.gemini.MODEL} الحقيقية.`);
+    parts.push(`${vocative}وصلتني 👌 أقدر أشرح الباقات، أحسب لك الأنسب حسب الطاولات، وأجهّز التفعيل، وأتابع أي عطل فني.`);
+    parts.push('من وين نبدأ؟');
   }
 
   const reason =
@@ -552,17 +568,17 @@ function mockReply(input: AgentInput, started: number): AgentOutput {
     intent === 'شكوى' ? 'شكوى/طلب استرداد' :
     intent === 'طلب_تحويل' ? 'طلب العميل محادثة بشرية' : undefined;
 
-  return {
+  return finishOutput({
     parts,
     handoff,
     reason,
     intent,
-    sentiment: handoff ? 'negative' : 'neutral',
+    sentiment: handoff ? 'negative' : /تحية|إيجابي|توصية|تفعيل/.test(intent) ? 'positive' : 'neutral',
     toolsCalled: [],
     sideEffects: [],
     usage: { promptTokens: 0, candidatesTokens: 0 },
     model: 'mock-engine',
     engine: 'mock',
     rawText: JSON.stringify({ reply_parts: parts, handoff, intent }),
-  };
+  });
 }

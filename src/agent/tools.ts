@@ -162,16 +162,17 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
     const plan = getPlan(id);
 
     const lines = [
-      `*${plan.name}*${plan.mostPopular ? ' (الأكثر طلبًا)' : ''} — ${plan.tagline}`,
+      `*${plan.name}*${plan.mostPopular ? ' ← الأكثر طلبًا' : ''} — ${plan.tagline}`,
       billing === 'monthly'
         ? `السعر: *${plan.priceMonthly} ₪/شهر*`
         : `السعر السنوي: *${plan.priceYearly} ₪* دفعة واحدة (≈ ${plan.priceYearlyPerMonth} ₪/شهر)`,
     ];
     if (billing === 'monthly') {
-      lines.push(`عند الدفع السنوي: ${plan.priceYearlyPerMonth} ₪/شهر — توفير ${plan.yearlySavings} ₪ (~17%)`);
+      lines.push(`ولو دفعت سنوي: ${plan.priceYearlyPerMonth} ₪/شهر — توفير *${plan.yearlySavings} ₪* (~17%)`);
     }
     lines.push('المزايا:');
     for (const f of plan.features) lines.push(`• ${f}`);
+    lines.push('تبيني أجهّز لك التفعيل، أو تبي باقة ثانية؟');
 
     log.tool(`get_plan_details → ${id} (${billing})`);
     return { ok: true, data: { plan: plan.id, billing, price: plan[billing === 'monthly' ? 'priceMonthly' : 'priceYearly'] }, userMessage: lines.join('\n') };
@@ -190,10 +191,10 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
       ok: true,
       data: { recommended: p.id, priceMonthly: p.priceMonthly, priceYearly: p.priceYearly, reason: rec.reason },
       userMessage: [
-        `أنسب باقة لحالتك: *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' (الأكثر طلبًا)' : ''}`,
-        `السبب: ${rec.reason}.`,
-        `عند الدفع السنوي: ${p.priceYearlyPerMonth} ₪/شهر — توفير ${p.yearlySavings} ₪.`,
-        'ويمكن الترقية أو التغيير في أي وقت من لوحة التحكم.',
+        `أنسب باقة لحالتك: *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`,
+        rec.reason + '.',
+        `ولو سنوي: ${p.priceYearlyPerMonth} ₪/شهر — توفير *${p.yearlySavings} ₪*، والترقية من اللوحة في أي وقت.`,
+        'تبيني أجهّز لك التفعيل؟',
       ].join('\n'),
     };
   },
@@ -223,9 +224,9 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
       ok: true,
       data: lead,
       userMessage:
-        `✅ تم تسجيل طلب التفعيل — رقم المرجع: ${lead.ref}\n` +
+        `يا سلام، سجّلت طلب التفعيل ✅ الرقم: *${lead.ref}*\n` +
         `*${lead.restaurant_name}* — ${lead.city} · ${lead.tables} طاولة · *${planName}*\n\n` +
-        `فريق مُريح سيتواصل معك الآن لاستكمال التفعيل — يتم خلال دقائق وبدون بطاقة ائتمانية للبدء 🚀`,
+        `الفريق يتواصل معك الآن لاستكمال التجهيز — خلال دقائق عادة وبدون بطاقة ائتمانية للبدء 🚀`,
       sideEffect: {
         kind: 'notify_human',
         payload: {
@@ -266,8 +267,8 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
       ok: true,
       data: ticket,
       userMessage:
-        `🎫 فتحت لك متابعة فورية برقم ${ticket.ref} (أولوية: ${prioAr[ticket.priority] ?? 'عادية'}).\n` +
-        `فريق الدعم سيتواصل معك قريبًا لحل الموضوع. شكرًا لصبرك.`,
+        `فتحت لك متابعة فورية برقم *${ticket.ref}* (أولوية: ${prioAr[ticket.priority] ?? 'عادية'}).\n` +
+        `زميلي من الدعم يكمل معك قريبًا. أنا آسف على الإزعاج، وبنحلّها.`,
       sideEffect: {
         kind: 'notify_human',
         payload: {

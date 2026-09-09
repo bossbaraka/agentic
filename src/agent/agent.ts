@@ -12,7 +12,14 @@ import {
   notifyHuman,
   reactToInbound,
   sendOutbound,
+  sendTyping,
 } from '../channels/send.js';
+import {
+  dayPart,
+  firstNameOf,
+  pickInboundReaction,
+  typingDelayMs,
+} from './personality.js';
 import type {
   AgentResult,
   ConversationState,
@@ -78,8 +85,10 @@ export class AgentOrchestrator {
 
     // (2) تعليم كمقروءة + مؤشر الكتابة (قبل أي معالجة ثقيلة)
     void markInbound(key, msg.waId);
-    if (config.whatsapp.AUTO_REACTION) {
-      void reactToInbound(key, msg.waId, config.whatsapp.AUTO_REACTION);
+    const auto = (config.whatsapp.AUTO_REACTION || '').trim();
+    if (auto.toLowerCase() !== 'off' && auto.toLowerCase() !== 'none') {
+      const emoji = auto || pickInboundReaction(msg.body);
+      if (emoji) void reactToInbound(key, msg.waId, emoji);
     }
 
     // (3) أوامر التحكم — تعمل حتى لو المحادثة بيد موظف بشري
@@ -117,7 +126,7 @@ export class AgentOrchestrator {
       log.warn(`تجاوز حد الرسائل من ${key} — كبح`);
       await sendOutbound(
         key,
-        'وصلتني رسائلك بسرعة 😅 أمهلني لحظة وأرد على كل شيء مرة واحدة.',
+        'وصلتني كلها 😅 أعطني لحظة ألملمها وأرد عليك مرة واحدة مرتبة.',
       );
       return;
     }
@@ -232,9 +241,24 @@ export class AgentOrchestrator {
           toolsEnabled: config.bot.TOOLS_ENABLED,
         });
 
-        const extraContext = batch.length > 1
-          ? `[ملاحظة نظام: العميل أرسل ${batch.length} رسائل متتابعة قبل أن ترد. أجب عليها جميعًا في رد واحد متماسك ولا تكرر نفسك.]`
-          : undefined;
+        const extraBits: string[] = [];
+        if (batch.length > 1) {
+          extraBits.push(`[ملاحظة نظام: العميل أرسل ${batch.length} رسائل متتابعة قبل أن ترد. أجب عليها جميعًا في رد واحد متماسك ولا تكرر نفسك.]`);
+        }
+        const lastIn = batch[batch.length - 1];
+        if (lastIn?.reply?.title) {
+          extraBits.push(`[ملاحظة نظام: العميل ضغط زرًا تفاعليًا بعنوان «${lastIn.reply.title}» — عامله كجواب واضح ولا تُعِد السؤال.]`);
+        }
+        const fname = firstNameOf(session.name);
+        if (fname) extraBits.push(`[اسم العميل للنداء بلطف: ${fname} — ليس في كل رسالة.]`);
+        extraBits.push(`[جزء اليوم: ${dayPart()} — حيِّ به فقط في أول تواصل أو بعد انقطاع.]`);
+        const inboundCount = session.messages.filter((m) => m.dir === 'in').length;
+        if (inboundCount <= batch.length) {
+          extraBits.push('[أول تواصل في هذه الجلسة — قدّم نفسك بجملة واحدة حيّة ثم اسأل سؤالًا واحدًا.]');
+        } else if (inboundCount > 1) {
+          extraBits.push('[عميل عائد في نفس الجلسة — لا تُعِد التعريف الكامل ولا التحية الرسمية.]');
+        }
+        const extraContext = extraBits.length ? extraBits.join('\n') : undefined;
 
         // (9) التوليد
         const started = Date.now();
@@ -258,7 +282,7 @@ export class AgentOrchestrator {
           this.emit({ t: 'error', sessionKey: key, message });
           await sendOutbound(
             key,
-            'عذرًا، صار خلل تقني بسيط عندي 😔 ممكن تعيد إرسال رسالتك؟ أو اكتب */بشري* للتحدث مع أحد الزملاء.',
+            'عذرًا، حصل عندي خلل تقني بسيط 😔 أعد إرسال رسالتك وأنا أكمّل معك. أو اكتب */بشري* وأوصلك بزميل من الفريق.',
           );
           return;
         }
@@ -282,11 +306,15 @@ export class AgentOrchestrator {
           this.emit({ t: 'tool', sessionKey: key, name: t.name, args: t.args, result: t.result });
         }
 
-        // (10) الإرسال
+        // (10) الإرسال — إيقاع بشري + أزرار على آخر جزء
         for (let i = 0; i < result.parts.length; i++) {
           const part = result.parts[i];
+          const last = i === result.parts.length - 1;
+          await sendTyping(key);
+          await sleep(typingDelayMs(part));
           const sent = await sendOutbound(key, part, {
             contextMessageId: i === 0 ? batch[batch.length - 1]?.waId : undefined,
+            buttons: last ? result.quickReplies : undefined,
           });
 
           const rec: StoredMessage = {
@@ -301,7 +329,6 @@ export class AgentOrchestrator {
           store.addOutbound(key, rec);
           this.emit({ t: 'outbound', sessionKey: key, name: session.name, message: rec, state: session.state });
 
-          if (i < result.parts.length - 1) await sleep(400);
         }
 
         // الإجراءات الجانبية
@@ -466,7 +493,7 @@ export class AgentOrchestrator {
       case 'bot': {
         store.setState(key, 'bot', '🤖 تم إرجاع المحادثة للرد الآلي');
         this.emit({ t: 'status', sessionKey: key, state: 'bot' });
-        await this.replyAndRecord(key, `تمام ✅ أنا ${config.bot.BOT_NAME} من جديد. تفضل، كيف أقدر أساعدك؟`, {
+        await this.replyAndRecord(key, `رجعت معك ✅ أنا ${config.bot.BOT_NAME}. تفضل، وش تحتاج الحين؟`, {
           phoneNumberId: msg.phoneNumberId,
           contextMessageId: msg.waId,
         });
@@ -479,7 +506,7 @@ export class AgentOrchestrator {
         this.emit({ t: 'status', sessionKey: key, state: 'human' });
         await this.replyAndRecord(
           key,
-          'حاضر 🙋 نوصلك بأحد الزملاء. سيصلك الرد من فريقنا في أقرب وقت.\n(للعودة للرد الآلي اكتب */بوت*)',
+          'حاضر، بوصلك بأحد الزملاء الحين 🙋 يكملون معك بأقرب وقت.\n(لو تبي ترجع لي اكتب */بوت*)',
           { phoneNumberId: msg.phoneNumberId, contextMessageId: msg.waId },
         );
         await notifyHuman(key, session.name, msg.body, 'أمر /بشري من العميل');
@@ -489,7 +516,7 @@ export class AgentOrchestrator {
       case 'pause': {
         store.setState(key, 'paused', '⏸️ إيقاف مؤقت للرد الآلي');
         this.emit({ t: 'status', sessionKey: key, state: 'paused' });
-        await this.replyAndRecord(key, 'تم إيقاف الرد الآلي مؤقتًا ⏸️ (اكتب */بوت* للتفعيل أو */استلام* للمتابعة البشرية)', {
+        await this.replyAndRecord(key, 'تمام، سكتّ الحين ⏸️ اكتب */بوت* لو تبي أرجع، أو */استلام* لمتابعة بشرية.', {
           phoneNumberId: msg.phoneNumberId,
         });
         break;
@@ -498,7 +525,7 @@ export class AgentOrchestrator {
       case 'resume': {
         store.setState(key, 'human', '🙋 متابعة بشرية');
         this.emit({ t: 'status', sessionKey: key, state: 'human' });
-        await this.replyAndRecord(key, 'أنا متابع معك الآن 👋 (اكتب */بوت* لإرجاع الرد الآلي)', {
+        await this.replyAndRecord(key, 'أنا معك الآن 👋 اكتب */بوت* لو تبي أرجع للرد الآلي.', {
           phoneNumberId: msg.phoneNumberId,
         });
         break;
@@ -508,19 +535,19 @@ export class AgentOrchestrator {
         store.delete(key);
         store.addSystem(key, '🔄 تم تصفير المحادثة بطلب العميل');
         this.emit({ t: 'status', sessionKey: key, state: 'bot', note: 'تصفير' });
-        await this.replyAndRecord(key, 'تم البدء من جديد 🔄 كيف أقدر أخدمك؟', { phoneNumberId: msg.phoneNumberId });
+        await this.replyAndRecord(key, 'صفحة جديدة، خلّينا نبدأ من الصفر ✨ كم طاولة تشتغل عندك؟', { phoneNumberId: msg.phoneNumberId });
         break;
       }
 
       case 'help': {
         const text = [
-          '*الأوامر المتاحة*',
+          'تحت أمرك — هذي الأوامر السريعة:',
           '',
-          '• */بوت* — إرجاع الرد الآلي',
-          '• */بشري* — التحدث مع موظف',
-          '• */مسح* — بدء محادثة جديدة',
-          '• */ايقاف مؤقت* — إسكات البوت',
-          '• */مساعدة* — هذه القائمة',
+          '• */بوت* — أرجع أرد عليك',
+          '• */بشري* — أوصلك بموظف',
+          '• */مسح* — نبدأ محادثة جديدة',
+          '• */ايقاف مؤقت* — أسكت شوي',
+          '• */مساعدة* — هذي القائمة',
         ].join('\n');
         await this.replyAndRecord(key, text, { phoneNumberId: msg.phoneNumberId });
         break;
