@@ -192,11 +192,13 @@ async function callGemini(
   contents: GeminiContent[],
   systemInstruction: string,
   toolsEnabled: boolean,
+  overrideModel?: string,
 ): Promise<any> {
   const ai = getClient();
+  const targetModel = overrideModel ?? config.gemini.MODEL;
 
   const params: Record<string, any> = {
-    model: config.gemini.MODEL,
+    model: targetModel,
     contents,
     config: {
       systemInstruction,
@@ -217,6 +219,13 @@ async function callGemini(
   const timer = setTimeout(() => controller.abort(), config.gemini.TIMEOUT_MS);
   try {
     return await (ai.models.generateContent as any)({ ...params, abortSignal: controller.signal });
+  } catch (err: any) {
+    const msg = String(err?.message ?? err);
+    if (/429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(msg) && targetModel !== config.gemini.FAST_MODEL) {
+      log.warn(`⚠️ انتهت حصة ${targetModel} المجانية — التحول التلقائي للموديل الاحتياطي ${config.gemini.FAST_MODEL}`);
+      return await callGemini(contents, systemInstruction, toolsEnabled, config.gemini.FAST_MODEL);
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }

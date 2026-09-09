@@ -50,8 +50,8 @@ export const config = {
     BASE_URL: str('GEMINI_BASE_URL', ''),
     /** عنوان بديل للـ API (مفيد للاختبار مع خادم محاكٍ أو وسيط/Proxy) */
     MODEL: (() => {
-      const m = str('GEMINI_MODEL', 'gemini-3.6-flash');
-      return (m === 'gemini-2.5-flash' || m === 'gemini-2.5-flash') ? 'gemini-3.6-flash' : m;
+      const m = str('GEMINI_MODEL', 'gemini-3.5-flash-lite');
+      return (m === 'gemini-2.5-flash' || m === 'gemini-2.5-flash') ? 'gemini-3.5-flash-lite' : m;
     })(),
     /** نموذج أرخص/أسرع لمهام التلخيص */
     FAST_MODEL: (() => {
