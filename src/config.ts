@@ -47,6 +47,7 @@ export const config = {
 
   gemini: {
     API_KEY: str('GEMINI_API_KEY', ''),
+    API_KEYS: list('GEMINI_API_KEY', []),
     BASE_URL: str('GEMINI_BASE_URL', ''),
     /** عنوان بديل للـ API (مفيد للاختبار مع خادم محاكٍ أو وسيط/Proxy) */
     MODEL: (() => {

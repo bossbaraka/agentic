@@ -176,16 +176,17 @@ function finishOutput(partial: Omit<AgentOutput, 'quickReplies'> & { quickReplie
 
 // ─────────────────────────── المحرك ───────────────────────────
 
-let client: GoogleGenAI | null = null;
+let currentKeyIndex = 0;
 
-function getClient(): GoogleGenAI {
-  if (!client) {
-    client = new GoogleGenAI({
-      apiKey: config.gemini.API_KEY,
-      ...(config.gemini.BASE_URL ? { httpOptions: { baseUrl: config.gemini.BASE_URL } } : {}),
-    } as any);
-  }
-  return client;
+function getClient(keyIndex?: number): GoogleGenAI {
+  const keys = config.gemini.API_KEYS.length ? config.gemini.API_KEYS : [config.gemini.API_KEY];
+  const index = Math.abs((keyIndex ?? currentKeyIndex) % keys.length);
+  const apiKey = keys[index] || config.gemini.API_KEY;
+
+  return new GoogleGenAI({
+    apiKey,
+    ...(config.gemini.BASE_URL ? { httpOptions: { baseUrl: config.gemini.BASE_URL } } : {}),
+  } as any);
 }
 
 async function callGemini(
@@ -193,8 +194,11 @@ async function callGemini(
   systemInstruction: string,
   toolsEnabled: boolean,
   overrideModel?: string,
+  keyAttempt = 0,
 ): Promise<any> {
-  const ai = getClient();
+  const keysCount = config.gemini.API_KEYS.length || 1;
+  const activeKeyIndex = (currentKeyIndex + keyAttempt) % keysCount;
+  const ai = getClient(activeKeyIndex);
   const targetModel = overrideModel ?? config.gemini.MODEL;
 
   const params: Record<string, any> = {
@@ -218,12 +222,20 @@ async function callGemini(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.gemini.TIMEOUT_MS);
   try {
-    return await (ai.models.generateContent as any)({ ...params, abortSignal: controller.signal });
+    const res = await (ai.models.generateContent as any)({ ...params, abortSignal: controller.signal });
+    currentKeyIndex = activeKeyIndex;
+    return res;
   } catch (err: any) {
     const msg = String(err?.message ?? err);
-    if (/429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(msg) && targetModel !== config.gemini.FAST_MODEL) {
-      log.warn(`⚠️ انتهت حصة ${targetModel} المجانية — التحول التلقائي للموديل الاحتياطي ${config.gemini.FAST_MODEL}`);
-      return await callGemini(contents, systemInstruction, toolsEnabled, config.gemini.FAST_MODEL);
+    if (/429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(msg)) {
+      if (keyAttempt < keysCount - 1) {
+        log.warn(`⚠️ انتهت حصة المفتاح رقم ${activeKeyIndex + 1} — التبديل للمفتاح التالي...`);
+        return await callGemini(contents, systemInstruction, toolsEnabled, overrideModel, keyAttempt + 1);
+      }
+      if (targetModel !== config.gemini.FAST_MODEL) {
+        log.warn(`⚠️ انتهت حصة ${targetModel} على كافة المفاتيح — التحول للموديل الاحتياطي ${config.gemini.FAST_MODEL}`);
+        return await callGemini(contents, systemInstruction, toolsEnabled, config.gemini.FAST_MODEL, 0);
+      }
     }
     throw err;
   } finally {
