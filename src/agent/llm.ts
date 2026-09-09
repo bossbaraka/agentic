@@ -391,7 +391,6 @@ export async function summarizeConversation(history: string, existingSummary: st
           systemInstruction: promptBuilder(existingSummary),
           temperature: 0.3,
           maxOutputTokens: 400,
-          thinkingConfig: { thinkingBudget: 0 },
         },
       }),
       { retries: 1, label: 'تلخيص المحادثة' },
