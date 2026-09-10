@@ -165,6 +165,32 @@ export const config = {
     IGNORE_FORWARDED: bool('IGNORE_FORWARDED', false),
   },
 
+  /**
+   * نظام الحجوزات (مواعيد التفعيل مع الفريق).
+   * ⚠️ هذه قيم افتراضية قابلة للتخصيص — عدّلها حسب ساعات العمل الفعلية لفريقك
+   * قبل التشغيل. البوت يعتبرها المصدر الوحيد للتوفر ولا يخترع مواعيد خارجها.
+   */
+  booking: {
+    /** أيام العمل (0=الأحد … 6=السبت) */
+    WORKING_DAYS: list('BOOKING_WORKING_DAYS', ['0', '1', '2', '3', '4'])
+      .map((d) => Number(d))
+      .filter((d) => Number.isInteger(d) && d >= 0 && d <= 6),
+    /** ساعة فتح الحجوزات (0-23) */
+    OPEN_HOUR: num('BOOKING_OPEN_HOUR', 9),
+    /** ساعة إغلاق الحجوزات (0-24) */
+    CLOSE_HOUR: num('BOOKING_CLOSE_HOUR', 17),
+    /** مدة كل موعد بالدقائق */
+    SLOT_MINUTES: num('BOOKING_SLOT_MINUTES', 60),
+    /** أقصى عدد حجوزات في نفس الموعد */
+    MAX_PER_SLOT: num('BOOKING_MAX_PER_SLOT', 1),
+    /** كم يومًا قادمًا يُسمح فيه بالحجز */
+    ADVANCE_DAYS: num('BOOKING_ADVANCE_DAYS', 14),
+    /** أقل مهلة إشعار قبل الموعد بالساعات (لليوم نفسه) */
+    MIN_NOTICE_HOURS: num('BOOKING_MIN_NOTICE_HOURS', 1),
+    /** المنطقة الزمنية للنشاط */
+    TIMEZONE: str('BOOKING_TIMEZONE', 'Asia/Jerusalem'),
+  },
+
   paths: {
     DATA_DIR: str('DATA_DIR', './data'),
     KNOWLEDGE_DIR: str('KNOWLEDGE_DIR', './knowledge'),
