@@ -243,7 +243,8 @@ export function validateConfig(): { ok: boolean; warnings: string[]; errors: str
   } else {
     if (!config.whatsapp.ACCESS_TOKEN || !config.whatsapp.PHONE_NUMBER_ID) {
       const msg = 'WHATSAPP_ACCESS_TOKEN / WHATSAPP_PHONE_NUMBER_ID غير مضبوطة — لن يستطيع البوت الإرسال لواتساب الحقيقي.';
-      demo ? warnings.push(msg) : errors.push(msg);
+      // إذا كان تيليجرام مفعلاً، نجعلها تحذيراً حتى لا يتعطل السيرفر بخطأ 1
+      demo || config.telegram.TOKEN ? warnings.push(msg) : errors.push(msg);
     }
 
     if (!config.whatsapp.VERIFY_TOKEN) {

@@ -15,7 +15,7 @@
     "demo": "tsx src/demo/simulate.ts",
     "tunnel": "bash scripts/tunnel.sh",
     "test": "tsx scripts/test-flow.ts",
-    "prestart": "node -e \"require('fs').mkdirSync('data',{recursive:true})\""
+    "prestart": "node -e \"import('fs').then(fs => fs.mkdirSync('data',{recursive:true}))\""
   },
   "dependencies": {
     "@fastify/static": "^8.0.0",
