@@ -99,7 +99,7 @@ export function buildBlueprintText(profile: RestaurantProfile): string {
     `🚀 *تصور الإطلاق — ${profile.restaurant_name ?? 'مطعمك'}*`,
     `${profile.city ?? ''}${branches > 1 ? ` · ${branches} فروع` : ''}${tables > 0 ? ` · ${tables} طاولة` : ''}`,
     '',
-    `*الباقة:* ${plan.name}${plan.mostPopular ? ' (الأكثر طلبًا)' : ''}`,
+    `*الباقة:* ${plan.name}${plan.mostPopular ? ' ← اختيار المطاعم الأكثر طلبًا' : ''}`,
     `*السعر:* *${plan.priceMonthly} ₪/شهر*${perTable} — ثابت وبدون رسوم مخفية`,
     `*السنوي:* ${plan.priceYearly} ₪ دفعة واحدة — توفير *${plan.yearlySavings} ₪*`,
     '',

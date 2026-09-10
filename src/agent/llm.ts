@@ -955,9 +955,27 @@ function stripThought(part: any): any {
   return part;
 }
 
+/**
+ * ملخص محلي حقيقي لو كان المشروع في وضع التجربة أو انقطعت مفاتيح النموذج.
+ * لا نضع عبارة عامة مثل «لا يوجد ملخص» لأن ذلك يمحو ذاكرة العميل عند طول الحوار.
+ */
+function localConversationSummary(history: string, existingSummary: string): string {
+  const lines = history
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^نظام\s*:/.test(line));
+  const recent = lines.slice(-10);
+  const merged = [existingSummary.trim(), ...recent]
+    .filter(Boolean)
+    .join(' | ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return merged.slice(-1800) || 'بدأت المحادثة حديثًا ولم تُسجّل تفاصيل كافية بعد.';
+}
+
 export async function summarizeConversation(history: string, existingSummary: string, promptBuilder: (s: string) => string): Promise<string> {
   if (config.llm.PROVIDER === 'openai') {
-    if (!config.openai.API_KEY) return existingSummary || 'لا يوجد ملخص (وضع التجربة).';
+    if (!config.openai.API_KEY) return localConversationSummary(history, existingSummary);
     try {
       const openai = getOpenAiClient();
       const completion = await openai.chat.completions.create({
@@ -969,14 +987,14 @@ export async function summarizeConversation(history: string, existingSummary: st
         temperature: 0.3,
         max_tokens: 400,
       });
-      return completion.choices?.[0]?.message?.content?.trim() || existingSummary;
+      return completion.choices?.[0]?.message?.content?.trim() || localConversationSummary(history, existingSummary);
     } catch (err) {
       log.warn(`تعذّر التلخيص عبر OpenAI: ${(err as Error).message}`);
-      return existingSummary;
+      return localConversationSummary(history, existingSummary);
     }
   }
 
-  if (!config.gemini.API_KEY) return existingSummary || 'لا يوجد ملخص (وضع التجربة).';
+  if (!config.gemini.API_KEY) return localConversationSummary(history, existingSummary);
 
   try {
     const ai = getClient();
@@ -999,10 +1017,10 @@ export async function summarizeConversation(history: string, existingSummary: st
       .join('\n')
       .trim();
 
-    return text || existingSummary;
+    return text || localConversationSummary(history, existingSummary);
   } catch (err) {
     log.warn(`تعذّر التلخيص: ${(err as Error).message}`);
-    return existingSummary;
+    return localConversationSummary(history, existingSummary);
   }
 }
 
@@ -1171,7 +1189,9 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
   } else if (askedActivation && (isAffirmative(raw) || /اسمي|المطعم|مقهى|كافيه|مطعمي/.test(text) || /\d/.test(text))) {
     intent = 'بيانات_تفعيل';
     if (isAffirmative(raw) && !/\d/.test(text) && !/مطعم|مقهى/.test(text)) {
-      parts.push('يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
+      parts.push(name
+        ? `يا سلام يا ${name}، خلّينا نجهّزها 🔥 واسم المطعم؟`
+        : 'يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
       intent = 'طلب_تفعيل';
     } else {
       parts.push(`✅ وصلت التفاصيل${name ? ' يا ' + name : ''}. فريق مُريح يتواصل معك الآن لاستكمال التجهيز — خلال دقائق عادة وبدون بطاقة ائتمانية للبدء 🚀`);
@@ -1197,11 +1217,15 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     const hasDetails = words >= 6 || (/\d/.test(text) && /مطعم|مقهى|كافيه/.test(text));
     if (isQuestion) {
       parts.push('التفعيل خلال دقائق عادةً، وبدون بطاقة ائتمانية للبدء 🚀');
-      parts.push('أربع خطوات بسيطة والفريق معك فيها. تبيني نبدأ؟ شو اسمك؟');
+      parts.push(name
+        ? `أربع خطوات بسيطة والفريق معك فيها. تبيني نبدأ؟ واسم المطعم؟`
+        : 'أربع خطوات بسيطة والفريق معك فيها. تبيني نبدأ؟ شو اسمك؟');
     } else if (hasDetails) {
       parts.push('✅ وصلتني طلبك. الفريق يتواصل معك الآن لاستكمال التجهيز — خلال دقائق وبدون بطاقة للبدء 🚀');
     } else {
-      parts.push('يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
+      parts.push(name
+        ? `يا سلام يا ${name}، خلّينا نجهّزها 🔥 واسم المطعم؟`
+        : 'يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
     }
   }
 
@@ -1245,7 +1269,9 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
 
   if (parts.length === 0 && askedActivation && isAffirmative(raw)) {
     intent = 'طلب_تفعيل';
-    parts.push('يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
+    parts.push(name
+      ? `يا سلام يا ${name}، خلّينا نجهّزها 🔥 واسم المطعم؟`
+      : 'يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
   }
 
   // ── التجهيز للإطلاق: مطعم ← مدينة ← طاولات ← باقة ← تصور ← تأكيد ← مدير المنصة
