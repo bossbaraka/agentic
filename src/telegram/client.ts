@@ -225,9 +225,9 @@ export async function fetchTgMedia(
 
 /** تنبيه المدير/الموظف في تيليجرام (لو ضبط TELEGRAM_HUMAN_CHAT_ID) */
 export async function tgNotifyHuman(customerName: string, chatKey: string, lastMessage: string, reason?: string): Promise<void> {
-  const to = config.telegram.HUMAN_CHAT_ID;
+  const to = config.telegram.MANAGER_CHAT_ID || config.telegram.HUMAN_CHAT_ID;
   if (!to) {
-    log.warn(`🚨 تنبيه تيليجرام: TELEGRAM_HUMAN_CHAT_ID غير مضبوط — يظهر التنبيه في لوحة التحكم فقط.`);
+    log.warn(`🚨 تنبيه تيليجرام: TELEGRAM_MANAGER_CHAT_ID / TELEGRAM_HUMAN_CHAT_ID غير مضبوط — يظهر التنبيه في لوحة التحكم فقط.`);
     return;
   }
 

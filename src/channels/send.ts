@@ -93,15 +93,16 @@ export async function notifyHuman(
   lastMessage: string,
   reason?: string,
 ): Promise<void> {
-  if (isTgKey(key)) {
+  const tgChatId = config.telegram.MANAGER_CHAT_ID || config.telegram.HUMAN_CHAT_ID;
+  if (tgChatId && config.telegram.TOKEN) {
     await tgNotifyHuman(customerName, key, lastMessage, reason);
-    return;
   }
-  if (waDisabled()) {
-    log.warn('⏸ واتساب موقوف — تنبيه الموظف يظهر في لوحة التحكم فقط.');
-    return;
+
+  if (!waDisabled()) {
+    await waNotifyHuman(key, customerName, lastMessage, reason);
+  } else if (!tgChatId) {
+    log.warn('⏸ واتساب موقوف ولا يوجد معرّف تيليجرام — تنبيه الموظف يظهر في لوحة التحكم فقط.');
   }
-  await waNotifyHuman(key, customerName, lastMessage, reason);
 }
 
 /** تطبيع رقم هاتف لصيغة واتساب (أرقام فقط بدون + أو أصفار دولية) */
@@ -112,21 +113,49 @@ export function normalizeWaNumber(raw: string): string {
 }
 
 /**
- * إرسال ملف طلب الإطلاق المؤكد لمدير المنصة (واتساب دائمًا —
- * حتى لو كانت محادثة العميل تيليجرام، فالمدير يستلم على واتساب).
+ * إرسال ملف طلب الإطلاق المؤكد لمدير المنصة.
+ * يرسل الإشعار للمدير عبر كل القنوات المتاحة (تيليجرام + واتساب معًا).
  */
 export async function notifyManager(note: string, orderRef?: string): Promise<boolean> {
+  let delivered = false;
+
+  // 1) الإرسال عبر تيليجرام للمدير
+  const tgChatId = config.telegram.MANAGER_CHAT_ID || config.telegram.HUMAN_CHAT_ID;
+  if (tgChatId && config.telegram.TOKEN) {
+    try {
+      log.ok(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة عبر تيليجرام (${tgChatId})`);
+      const r = await tgSendText(tgChatId, note);
+      if (r.ok) {
+        delivered = true;
+      } else {
+        log.warn(`⚠️ تعذّر تسليم طلب الإطلاق عبر تيليجرام: ${r.error ?? '؟'}`);
+      }
+    } catch (err) {
+      log.error(`فشل إرسال طلب الإطلاق للمدير على تيليجرام: ${(err as Error).message}`);
+    }
+  } else {
+    log.warn('⚠️ إرسال تيليجرام للمدير معطّل — تأكد من ضبط TELEGRAM_MANAGER_CHAT_ID');
+  }
+
+  // 2) الإرسال عبر واتساب للمدير
   const to = normalizeWaNumber(config.whatsapp.MANAGER_NUMBER || config.whatsapp.HUMAN_AGENT_ID);
   if (!to) {
-    log.error('⛔ لا يوجد رقم مدير — اضبط WHATSAPP_MANAGER_NUMBER في .env (طلب الإطلاق محفوظ في data/orders.json واللوحة)');
-    return false;
+    log.warn('ℹ️ لا يوجد رقم واتساب للمدير (اضبط WHATSAPP_MANAGER_NUMBER في .env)');
+  } else if (waDisabled()) {
+    log.warn('⏸ واتساب موقوف أو غير مكتمل — تم إرسال الإشعار عبر القنوات الأخرى.');
+  } else {
+    try {
+      log.wa(`🚀 محاولة إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة على واتساب (${to.slice(0, 3)}…${to.slice(-4)})`);
+      const r = await waSendText(to, note);
+      if (r.ok) {
+        delivered = true;
+      } else {
+        log.warn(`⚠️ فشل إرسال طلب الإطلاق لواتساب المدير: ${r.error ?? '؟'}`);
+      }
+    } catch (err) {
+      log.error(`خطأ أثناء إرسال إشعار واتساب للمدير: ${(err as Error).message}`);
+    }
   }
-  if (waDisabled()) {
-    log.warn('⏸ واتساب موقوف — طلب الإطلاق يظهر في لوحة التحكم فقط.');
-    return false;
-  }
-  log.wa(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة (${to.slice(0, 3)}…${to.slice(-4)})`);
-  const r = await waSendText(to, note);
-  if (!r.ok) log.error(`فشل إرسال طلب الإطلاق للمدير: ${r.error ?? '؟'}`);
-  return r.ok;
+
+  return delivered;
 }

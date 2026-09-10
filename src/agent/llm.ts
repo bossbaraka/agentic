@@ -1,4 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
+import OpenAI from 'openai';
 import { config } from '../config.js';
 import { extractJson, log, retry, sanitizeForJson, sleep, splitText } from '../lib/utils.js';
 import type { MediaPart } from '../types.js';
@@ -18,10 +19,10 @@ import {
 } from './personality.js';
 
 /**
- * محرك الذكاء: يغلّف Gemini ويحوّل الرد الخام إلى بنية مضبوطة.
+ * محرك الذكاء: يغلّف OpenAI و Gemini ويحوّل الرد الخام إلى بنية مضبوطة.
  *
- * - يبني سجل المحادثة بصيغة Gemini Contents
- * - يمرر الوسائط كـ inlineData (صور/صوت/فيديو/PDF)
+ * - يدعم OpenAI (GPT-4o / GPT-4o-mini) و Google Gemini
+ * - يمرر الوسائط كـ inlineData أو image_url
  * - ينفّذ استدعاءات الدوال (Function Calling) في حلقة حتى يستقر الرد
  * - يفكّ JSON الخارج من النموذج بشكل متسامح (لو خرج نص عادي، نتعامل معه)
  */
@@ -55,7 +56,7 @@ export interface AgentOutput {
   sideEffects: { kind: string; payload: Record<string, unknown>; tool: string }[];
   usage: { promptTokens: number; candidatesTokens: number };
   model: string;
-  engine: 'gemini' | 'mock';
+  engine: 'gemini' | 'mock' | 'openai';
   rawText: string;
   /**
    * true عندما تعذّر الوصول لـ Gemini فأجاب البوت من بياناته المحلية الدقيقة
@@ -330,6 +331,49 @@ function getClient(keyIndex?: number): GoogleGenAI {
   } as any);
 }
 
+let openAiClientInstance: OpenAI | null = null;
+function getOpenAiClient(): OpenAI {
+  if (!openAiClientInstance) {
+    openAiClientInstance = new OpenAI({
+      apiKey: config.openai.API_KEY,
+      ...(config.openai.BASE_URL ? { baseURL: config.openai.BASE_URL } : {}),
+      timeout: config.openai.TIMEOUT_MS,
+    });
+  }
+  return openAiClientInstance;
+}
+
+function toOpenAiSchema(val: any): any {
+  if (val === null || typeof val !== 'object') return val;
+  if (Array.isArray(val)) return val.map(toOpenAiSchema);
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(val)) {
+    if (k === 'type' && typeof v === 'string') {
+      out[k] = v.toLowerCase();
+    } else {
+      out[k] = toOpenAiSchema(v);
+    }
+  }
+  return out;
+}
+
+function getOpenAiTools(): OpenAI.Chat.ChatCompletionTool[] {
+  const tools: OpenAI.Chat.ChatCompletionTool[] = [];
+  for (const group of TOOL_DECLARATIONS) {
+    for (const fn of (group as any).functionDeclarations ?? []) {
+      tools.push({
+        type: 'function',
+        function: {
+          name: fn.name,
+          description: fn.description,
+          parameters: toOpenAiSchema(fn.parameters) ?? { type: 'object', properties: {} },
+        },
+      });
+    }
+  }
+  return tools;
+}
+
 // ─────────────────────────── تشخيص أخطاء Gemini ───────────────────────────
 
 export type GeminiErrorKind =
@@ -506,12 +550,212 @@ async function callGemini(
 }
 
 /**
+ * توليد الرد عبر OpenAI (GPT-4o / GPT-4o-mini).
+ * ينفّذ حلقة استدعاء الدوال حتى يعود النموذج برد نصي نهائي أو JSON.
+ */
+async function generateReplyOpenAI(input: AgentInput, started: number): Promise<AgentOutput> {
+  void started;
+  const openai = getOpenAiClient();
+  const toolsCalled: AgentOutput['toolsCalled'] = [];
+  const sideEffects: { kind: string; payload: Record<string, unknown>; tool: string }[] = [];
+  const toolFallbacks: string[] = [];
+  let promptTokens = 0;
+  let candidatesTokens = 0;
+  const modelUsed = config.openai.MODEL;
+
+  const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+    { role: 'system', content: input.systemPrompt },
+  ];
+
+  const turns = normalizeTurns(input.turns);
+  if (input.extraContext && turns.length) {
+    const last = turns[turns.length - 1];
+    if (last.role === 'user') last.text = `${input.extraContext}\n\n${last.text}`;
+  }
+
+  for (const turn of turns) {
+    if (turn.role === 'user') {
+      const hasImage = turn.media?.some((m) => m.data && m.mimeType.startsWith('image/'));
+      if (hasImage) {
+        const content: OpenAI.Chat.ChatCompletionContentPart[] = [];
+        if (turn.text) content.push({ type: 'text', text: turn.text });
+        for (const m of turn.media ?? []) {
+          if (m.data && m.mimeType.startsWith('image/')) {
+            content.push({
+              type: 'image_url',
+              image_url: { url: `data:${m.mimeType};base64,${m.data}` },
+            });
+          } else if (m.note) {
+            content.push({ type: 'text', text: m.note });
+          }
+        }
+        messages.push({ role: 'user', content });
+      } else {
+        const textParts = [turn.text];
+        for (const m of turn.media ?? []) {
+          if (m.note) textParts.push(m.note);
+        }
+        messages.push({ role: 'user', content: textParts.filter(Boolean).join('\n') || '(رسالة فارغة)' });
+      }
+    } else {
+      messages.push({ role: 'assistant', content: turn.text || '' });
+    }
+  }
+
+  if (messages.length === 1) {
+    const lastUserText =
+      [...input.turns].reverse().find((t) => t.role === 'user')?.text?.trim() ||
+      '(رسالة فارغة)';
+    messages.push({ role: 'user', content: lastUserText });
+  }
+
+  const openAiTools = input.toolsEnabled ? getOpenAiTools() : undefined;
+  const MAX_TOOL_LOOPS = 4;
+  let finalText = '';
+
+  for (let loop = 0; loop <= MAX_TOOL_LOOPS; loop++) {
+    const params: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
+      model: modelUsed,
+      messages,
+      temperature: config.openai.TEMPERATURE,
+      max_tokens: config.openai.MAX_TOKENS,
+      ...(openAiTools && openAiTools.length > 0 ? { tools: openAiTools } : {}),
+      ...(!openAiTools || openAiTools.length === 0 ? { response_format: { type: 'json_object' } } : {}),
+    };
+
+    const completion = await retry<OpenAI.Chat.ChatCompletion>(
+      () => openai.chat.completions.create(params),
+      {
+        retries: config.openai.RETRIES,
+        label: `استدعاء OpenAI (${modelUsed})`,
+      },
+    );
+
+    promptTokens += completion.usage?.prompt_tokens ?? 0;
+    candidatesTokens += completion.usage?.completion_tokens ?? 0;
+
+    const choice = completion.choices?.[0];
+    const message = choice?.message;
+
+    if (!message) break;
+
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      messages.push(message);
+
+      for (const tc of message.tool_calls) {
+        if (tc.type !== 'function') continue;
+        const name = tc.function.name;
+        let args: Record<string, any> = {};
+        try {
+          args = tc.function.arguments ? JSON.parse(tc.function.arguments) : {};
+        } catch {
+          args = {};
+        }
+
+        const result: ToolResult = await runTool(name, args, input.toolContext);
+        toolsCalled.push({ name, args, result: result.data });
+
+        if (result.sideEffect) {
+          sideEffects.push({ kind: result.sideEffect.kind, payload: result.sideEffect.payload, tool: name });
+          log.tool(`إجراء جانبي من ${name}: ${result.sideEffect.kind}`);
+        }
+
+        if (result.userMessage?.trim()) toolFallbacks.push(result.userMessage.trim());
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: tc.id,
+          content: JSON.stringify({
+            ok: result.ok,
+            result: result.data,
+            ...(result.userMessage ? { suggested_copy: result.userMessage } : {}),
+          }),
+        });
+      }
+
+      await sleep(50);
+      continue;
+    }
+
+    finalText = message.content ?? '';
+    break;
+  }
+
+  const parsed = parseAgentJson(finalText);
+  let outParts = parsed.parts;
+
+  if (outParts.length > config.bot.MAX_REPLY_PARTS) {
+    outParts = [
+      ...outParts.slice(0, config.bot.MAX_REPLY_PARTS - 1),
+      outParts.slice(config.bot.MAX_REPLY_PARTS - 1).join('\n'),
+    ];
+  }
+
+  if (outParts.length === 0) {
+    if (toolFallbacks.length) outParts = toolFallbacks.slice(0, config.bot.MAX_REPLY_PARTS);
+    else if (!parsed.handoff) {
+      outParts = [
+        'وصلتني رسالتك 👍 خلّيني أختصر عليك الطريق: أقدر أشرح لك *الباقات والأسعار*، أو *أحسب لك الأنسب* حسب عدد الطاولات، أو *أجهّز لك التفعيل* مباشرة.',
+        'من وين تحب نبدأ؟',
+      ];
+      if (!parsed.intent) parsed.intent = 'عام';
+    }
+  }
+
+  const supportTicket = toolsCalled.some((t) => t.name === 'create_support_ticket');
+  const confirmedOrder = toolsCalled.find((t) => t.name === 'confirm_launch_order');
+  const orderRef =
+    confirmedOrder && (confirmedOrder.result as any)?.order_ref
+      ? String((confirmedOrder.result as any).order_ref)
+      : undefined;
+
+  return finishOutput({
+    parts: outParts,
+    handoff: parsed.handoff || supportTicket || Boolean(orderRef),
+    reason:
+      parsed.reason ??
+      (orderRef ? `طلب إطلاق مؤكد ${orderRef} — حُوّل لمدير المنصة` : undefined) ??
+      (supportTicket ? 'تذكرة دعم فُتحت — متابعة بشرية' : undefined),
+    orderRef,
+    intent: parsed.intent,
+    sentiment: parsed.sentiment,
+    quickReplies: parsed.quickReplies,
+    toolsCalled,
+    sideEffects,
+    usage: { promptTokens, candidatesTokens },
+    model: modelUsed,
+    engine: 'openai',
+    rawText: finalText,
+  });
+}
+
+/**
  * توليد الرد — بوابة آمنة لا ترمي خطأ للعميل أبدًا:
- * عند فشل Gemini نهائيًا (حصة/مفتاح/شبكة) يردّ البوت من بياناته المحلية
- * الدقيقة (نفس أسعار الباقات الرسمية) مع وسم degraded لتنبيه صاحبه.
+ * يوجّه الطلب إلى OpenAI أو Gemini حسب الضبط مع دعم التراجع الذكي.
  */
 export async function generateReply(input: AgentInput): Promise<AgentOutput> {
   const started = Date.now();
+
+  if (config.llm.PROVIDER === 'openai') {
+    if (!config.openai.API_KEY) {
+      return mockReply(input, started);
+    }
+    try {
+      return await generateReplyOpenAI(input, started);
+    } catch (err) {
+      log.error(`فشل OpenAI: ${(err as Error).message}`);
+      if (config.gemini.API_KEY) {
+        try {
+          log.warn('↩️ التبديل التلقائي إلى Gemini كبديل لـ OpenAI...');
+          return await generateReplyInner(input, started);
+        } catch (geminiErr) {
+          log.error(`فشل Gemini الاحتياطي أيضًا: ${(geminiErr as Error).message}`);
+        }
+      }
+      const fb = mockReply(input, started);
+      return { ...fb, degraded: true, degradedReason: `OpenAI error: ${(err as Error).message}` };
+    }
+  }
 
   if (!config.gemini.API_KEY) {
     return mockReply(input, started);
@@ -712,6 +956,26 @@ function stripThought(part: any): any {
 }
 
 export async function summarizeConversation(history: string, existingSummary: string, promptBuilder: (s: string) => string): Promise<string> {
+  if (config.llm.PROVIDER === 'openai') {
+    if (!config.openai.API_KEY) return existingSummary || 'لا يوجد ملخص (وضع التجربة).';
+    try {
+      const openai = getOpenAiClient();
+      const completion = await openai.chat.completions.create({
+        model: config.openai.FAST_MODEL || 'gpt-4o-mini',
+        messages: [
+          { role: 'system', content: promptBuilder(existingSummary) },
+          { role: 'user', content: history },
+        ],
+        temperature: 0.3,
+        max_tokens: 400,
+      });
+      return completion.choices?.[0]?.message?.content?.trim() || existingSummary;
+    } catch (err) {
+      log.warn(`تعذّر التلخيص عبر OpenAI: ${(err as Error).message}`);
+      return existingSummary;
+    }
+  }
+
   if (!config.gemini.API_KEY) return existingSummary || 'لا يوجد ملخص (وضع التجربة).';
 
   try {

@@ -130,8 +130,8 @@ export interface AgentResult {
   toolsCalled: { name: string; args: Record<string, unknown>; result: unknown }[];
   usage: { promptTokens: number; candidatesTokens: number };
   model: string;
-  /** المحرك المستخدم: gemini أو mock */
-  engine: 'gemini' | 'mock';
+  /** المحرك المستخدم: gemini أو mock أو openai */
+  engine: 'gemini' | 'mock' | 'openai';
   latencyMs: number;
 }
 

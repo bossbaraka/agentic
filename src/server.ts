@@ -400,7 +400,11 @@ async function main() {
     `  الصحّة        http://localhost:${config.server.PORT}/health`,
     '',
     `  وضع التشغيل   ${config.env.DEMO_MODE ? '🧪 تجربة' : '🚀 حقيقي'}`,
-    `  المحرك        ${config.gemini.API_KEY ? `✨ Gemini (${config.gemini.MODEL})` : '🧪 محرك وهمي (لا يوجد GEMINI_API_KEY)'}`,
+    `  المحرك        ${
+      config.llm.PROVIDER === 'openai'
+        ? (config.openai.API_KEY ? `✨ OpenAI (${config.openai.MODEL})` : '🧪 محرك وهمي (لا يوجد OPENAI_API_KEY)')
+        : (config.gemini.API_KEY ? `✨ Gemini (${config.gemini.MODEL})` : '🧪 محرك وهمي (لا يوجد GEMINI_API_KEY)')
+    }`,
     `  واتساب        ${config.whatsapp.ENABLED ? (config.whatsapp.ACCESS_TOKEN ? '🚀 مفعّل' : '🧪 بدون توكن (تجربة)') : '⏸ موقوف — حتى حل مشكلة Meta'}`,
     `  تيليجرام      ${config.telegram.TOKEN ? (config.env.DEMO_MODE ? '🧪 توكن مضبوط (شغّل DEMO_MODE=false)' : config.telegram.WEBHOOK_URL ? '🚀 webhook' : '🚀 استطلاع دوري') : '⬜ غير مضبوط (TELEGRAM_BOT_TOKEN فارغ)'}`,
     `  نوع البوت     ${config.bot.MODE}`,

@@ -53,6 +53,22 @@ export const config = {
     KEEP_ALIVE_INTERVAL_MINUTES: num('KEEP_ALIVE_INTERVAL_MINUTES', 10),
   },
 
+  llm: {
+    /** المحرك المعتمد: openai أو gemini */
+    PROVIDER: (str('LLM_PROVIDER', '').toLowerCase() || (process.env.OPENAI_API_KEY ? 'openai' : 'gemini')) as 'openai' | 'gemini',
+  },
+
+  openai: {
+    API_KEY: str('OPENAI_API_KEY', ''),
+    MODEL: str('OPENAI_MODEL', 'gpt-4o'),
+    FAST_MODEL: str('OPENAI_FAST_MODEL', 'gpt-4o-mini'),
+    BASE_URL: str('OPENAI_BASE_URL', ''),
+    TEMPERATURE: num('OPENAI_TEMPERATURE', 0.7),
+    MAX_TOKENS: num('OPENAI_MAX_TOKENS', 1024),
+    TIMEOUT_MS: num('OPENAI_TIMEOUT_MS', 45_000),
+    RETRIES: num('OPENAI_RETRIES', 2),
+  },
+
   gemini: {
     API_KEY: str('GEMINI_API_KEY', ''),
     API_KEYS: list('GEMINI_API_KEY', []),
@@ -116,6 +132,8 @@ export const config = {
     WEBHOOK_SECRET: str('TELEGRAM_WEBHOOK_SECRET', ''),
     /** معرف الدردشة الإدارية الذي يستقبل تنبيهات التحويل/الليدات (اختياري) */
     HUMAN_CHAT_ID: str('TELEGRAM_HUMAN_CHAT_ID', ''),
+    /** معرف دردشة المدير الذي يستلم إشعارات طلبات الشراء والإطلاق */
+    MANAGER_CHAT_ID: str('TELEGRAM_MANAGER_CHAT_ID', '') || str('TELEGRAM_HUMAN_CHAT_ID', ''),
     TIMEOUT_MS: num('TELEGRAM_TIMEOUT_MS', 40_000),
     /** حد الرسالة الواحدة في تيليجرام 4096 — نترك هامش أمان */
     MAX_SEGMENT_CHARS: num('TELEGRAM_MAX_SEGMENT_CHARS', 3900),
@@ -162,19 +180,30 @@ export function validateConfig(): { ok: boolean; warnings: string[]; errors: str
   const errors: string[] = [];
   const demo = config.env.DEMO_MODE;
 
-  if (!config.gemini.API_KEY) {
-    const msg = 'GEMINI_API_KEY غير مضبوط — سيتم استخدام محرك ردود وهمي (Mock) للتجربة فقط.';
-    demo ? warnings.push(msg) : errors.push(msg);
+  if (config.llm.PROVIDER === 'openai') {
+    if (!config.openai.API_KEY) {
+      const msg = 'OPENAI_API_KEY غير مضبوط — سيتم استخدام محرك ردود وهمي (Mock) للتجربة فقط.';
+      demo ? warnings.push(msg) : errors.push(msg);
+    }
+  } else {
+    if (!config.gemini.API_KEY) {
+      const msg = 'GEMINI_API_KEY غير مضبوط — سيتم استخدام محرك ردود وهمي (Mock) للتجربة فقط.';
+      demo ? warnings.push(msg) : errors.push(msg);
+    }
+
+    // موديلات أُطفئت من Google نهائيًا — أي طلب لها يردّ 404 (خلل دائم لو لم تُغيَّر)
+    if (/gemini-(1\.0|1\.5|2\.0)/i.test(config.gemini.MODEL)) {
+      warnings.push(
+        `⚠️ الموديل ${config.gemini.MODEL} متوقف من Google (يرجع 404) — غيّر GEMINI_MODEL إلى gemini-2.5-flash أو gemini-3.5-flash-lite. سيحاول البوت البدائل تلقائيًا.`,
+      );
+    }
+    if (config.gemini.API_KEYS.length > 1) {
+      warnings.push(`ℹ️ تم رصد ${config.gemini.API_KEYS.length} مفاتيح Gemini — سيتم التحويل التلقائي بينها عند انتهاء الحصة.`);
+    }
   }
 
-  // موديلات أُطفئت من Google نهائيًا — أي طلب لها يردّ 404 (خلل دائم لو لم تُغيَّر)
-  if (/gemini-(1\.0|1\.5|2\.0)/i.test(config.gemini.MODEL)) {
-    warnings.push(
-      `⚠️ الموديل ${config.gemini.MODEL} متوقف من Google (يرجع 404) — غيّر GEMINI_MODEL إلى gemini-2.5-flash أو gemini-3.5-flash-lite. سيحاول البوت البدائل تلقائيًا.`,
-    );
-  }
-  if (config.gemini.API_KEYS.length > 1) {
-    warnings.push(`ℹ️ تم رصد ${config.gemini.API_KEYS.length} مفاتيح Gemini — سيتم التحويل التلقائي بينها عند انتهاء الحصة.`);
+  if (!config.telegram.MANAGER_CHAT_ID && !config.telegram.HUMAN_CHAT_ID) {
+    warnings.push('⚠️ TELEGRAM_MANAGER_CHAT_ID غير مضبوط — لن تصل إشعارات الطلبات المؤكدة لتيليجرام المدير.');
   }
 
   if (!config.whatsapp.ENABLED) {

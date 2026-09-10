@@ -139,8 +139,18 @@ export function managerOrderMessage(
   const tables = profile.tables ?? 0;
   const branches = profile.branches && profile.branches > 0 ? profile.branches : 1;
 
+  const isTg = sessionKey.startsWith('tg:');
+  const tgUser = isTg ? sessionKey.replace('tg:', '') : '';
+  const rawPhone = profile.whatsapp_number || (!isTg ? sessionKey : '');
+  const cleanPhone = rawPhone.replace(/[^\d]/g, '').replace(/^00/, '');
+  const waDirectLink = cleanPhone ? `https://wa.me/${cleanPhone}` : '';
+
+  const contactLine = isTg
+    ? `💬 القناة: تيليجرام (معرّف الدردشة: ${tgUser})${cleanPhone ? `\n📱 هاتف/واتساب: ${cleanPhone}\n🔗 رابط المراسلة: ${waDirectLink}` : ''}`
+    : `📱 واتساب العميل: ${cleanPhone || sessionKey}\n🔗 رابط المراسلة الفوري: ${waDirectLink}`;
+
   const lines = [
-    `🚀 *طلب إطلاق جديد مؤكد* ${orderRef}`,
+    `🚀 *طلب إطلاق جديد مؤكد* (${orderRef})`,
     '',
     `👤 العميل: ${profile.full_name ?? '—'}`,
     `🍽️ المطعم: ${profile.restaurant_name ?? '—'} — ${profile.city ?? '—'}`,
@@ -149,11 +159,11 @@ export function managerOrderMessage(
       (tables > 0 ? ` (~${perTableMonthly(plan, tables)} ₪/طاولة)` : ''),
     `💳 السنوي المتاح: ${plan.priceYearly} ₪ (توفير ${plan.yearlySavings} ₪)`,
     `🎨 الشعار: ${profile.has_logo === true ? 'جاهز عند العميل' : profile.has_logo === false ? 'غير جاهز — جهزوا هوية مؤقتة' : 'غير معروف'}`,
-    `📱 واتساب العميل: ${profile.whatsapp_number ?? sessionKey}`,
-    `🔑 الجلسة: ${sessionKey}`,
+    contactLine,
+    `🔑 معرف الجلسة: ${sessionKey}`,
   ];
   if (profile.notes?.trim()) lines.push(`📝 ملاحظات: ${profile.notes.trim().slice(0, 300)}`);
-  lines.push('', 'المحادثة حُوّلت لك — أكمل مع العميل تجهيز النسخة.');
+  lines.push('', 'المحادثة حُوّلت لك — يمكنك الآن التواصل مع العميل وتجهيز نسخته.');
   return lines.join('\n');
 }
 
