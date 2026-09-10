@@ -145,8 +145,18 @@ export function managerOrderMessage(
   const cleanPhone = rawPhone.replace(/[^\d]/g, '').replace(/^00/, '');
   const waDirectLink = cleanPhone ? `https://wa.me/${cleanPhone}` : '';
 
+  const cleanTgUser = profile.telegram_username ? profile.telegram_username.replace(/^@/, '') : '';
+  const tgDirectLink = cleanTgUser
+    ? `https://t.me/${cleanTgUser}`
+    : isTg
+      ? `tg://user?id=${tgUser}`
+      : '';
+
   const contactLine = isTg
-    ? `💬 القناة: تيليجرام (معرّف الدردشة: ${tgUser})${cleanPhone ? `\n📱 هاتف/واتساب: ${cleanPhone}\n🔗 رابط المراسلة: ${waDirectLink}` : ''}`
+    ? `💬 القناة: تيليجرام (Chat ID: ${tgUser})\n` +
+      `👤 يوزر العميل: ${profile.telegram_username ? profile.telegram_username : 'غير محدد'}\n` +
+      `🔗 رابط التواصل المباشر مع العميل: ${tgDirectLink}` +
+      (cleanPhone ? `\n📱 هاتف/واتساب: ${cleanPhone}\n🔗 رابط المراسلة: ${waDirectLink}` : '')
     : `📱 واتساب العميل: ${cleanPhone || sessionKey}\n🔗 رابط المراسلة الفوري: ${waDirectLink}`;
 
   const lines = [

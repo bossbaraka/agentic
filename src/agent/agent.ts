@@ -84,6 +84,9 @@ export class AgentOrchestrator {
 
     // تحديث اسم العميل من ملفه الشخصي
     store.setName(key, msg.contactName);
+    if (msg.telegramUsername) {
+      store.patchProfile(key, { telegram_username: msg.telegramUsername });
+    }
     const session = store.get(key);
 
     // (2) تعليم كمقروءة + مؤشر الكتابة (قبل أي معالجة ثقيلة)
