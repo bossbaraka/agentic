@@ -24,3 +24,5 @@ services:
         value: true
       - key: KEEP_ALIVE_INTERVAL_MINUTES
         value: 10
+      - key: WHATSAPP_MANAGER_NUMBER
+        value: "970593498909"

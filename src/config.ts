@@ -103,7 +103,7 @@ export const config = {
      * رقم مدير المنصة (واتساب، أرقام فقط) — تُرسل إليه طلبات الإطلاق
      * المؤكدة كاملةً فور تأكيد العميل، وتُحوَّل إليه المحادثة.
      */
-    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', '970599891559'),
+    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', '970593498909'),
   },
 
   /** تيليجرام — القناة البديلة/المكمّلة */
