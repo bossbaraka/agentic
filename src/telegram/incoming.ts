@@ -32,15 +32,19 @@ export function parseTelegramUpdate(u: any): NormalizedInbound | null {
         if (String(b.callback_data) === data) title = String(b.text ?? data);
       }
     }
-    const contactName =
-      [from.first_name, from.last_name].filter(Boolean).join(' ') ||
-      (from.username ? `@${from.username}` : `TG-${chatId}`);
+    const usernameRaw = from.username ? String(from.username).trim() : '';
+    const telegramUsername = usernameRaw ? (usernameRaw.startsWith('@') ? usernameRaw : `@${usernameRaw}`) : undefined;
+    const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ');
+    const contactName = fullName
+      ? (telegramUsername ? `${fullName} (${telegramUsername})` : fullName)
+      : (telegramUsername || `TG-${chatId}`);
     return {
       channel: 'tg',
       waId: `tgcb${u.update_id ?? cq.id ?? Date.now()}`,
       from: `tg:${chatId}`,
       phoneNumberId: 'telegram',
       contactName,
+      telegramUsername,
       type: 'interactive',
       timestamp: Date.now(),
       forwarded: false,
@@ -56,9 +60,12 @@ export function parseTelegramUpdate(u: any): NormalizedInbound | null {
 
   const from = msg.from ?? {};
   const chatId = String(chat.id);
-  const contactName =
-    [from.first_name, from.last_name].filter(Boolean).join(' ') ||
-    (from.username ? `@${from.username}` : `TG-${chatId}`);
+  const usernameRaw = from.username ? String(from.username).trim() : '';
+  const telegramUsername = usernameRaw ? (usernameRaw.startsWith('@') ? usernameRaw : `@${usernameRaw}`) : undefined;
+  const fullName = [from.first_name, from.last_name].filter(Boolean).join(' ');
+  const contactName = fullName
+    ? (telegramUsername ? `${fullName} (${telegramUsername})` : fullName)
+    : (telegramUsername || `TG-${chatId}`);
 
   const base: NormalizedInbound = {
     channel: 'tg',
@@ -66,6 +73,7 @@ export function parseTelegramUpdate(u: any): NormalizedInbound | null {
     from: `tg:${chatId}`,
     phoneNumberId: 'telegram',
     contactName,
+    telegramUsername,
     type: 'text',
     timestamp: (typeof msg.date === 'number' ? msg.date : 0) * 1000 || Date.now(),
     forwarded: Boolean(msg.forward_from ?? msg.forward_origin),

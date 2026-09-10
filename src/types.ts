@@ -71,6 +71,7 @@ export interface RestaurantProfile {
   /** هل الشعار/الهوية جاهزان؟ */
   has_logo?: boolean;
   whatsapp_number?: string;
+  telegram_username?: string;
   notes?: string;
   updatedAt?: number;
 }

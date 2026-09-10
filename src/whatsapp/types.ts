@@ -101,6 +101,7 @@ export interface NormalizedInbound {
   from: string;
   phoneNumberId: string;    // رقم النشاط الذي استقبل الرسالة
   contactName: string;
+  telegramUsername?: string;
   type: string;             // text | image | audio | ...
   timestamp: number;
   forwarded: boolean;

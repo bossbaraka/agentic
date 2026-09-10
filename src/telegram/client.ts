@@ -231,9 +231,13 @@ export async function tgNotifyHuman(customerName: string, chatKey: string, lastM
     return;
   }
 
+  const isTg = chatKey.startsWith('tg:');
+  const tgId = isTg ? chatKey.replace('tg:', '') : '';
+  const userLink = isTg ? `\n🔗 رابط التواصل المباشر مع العميل: tg://user?id=${tgId}` : '';
+
   const text =
     `🔔 *تحويل محادثة لموظف بشري (تيليجرام)*\n` +
-    `العميل: ${customerName} (${chatKey})\n` +
+    `العميل: ${customerName} (${chatKey})${userLink}\n` +
     (reason ? `السبب: ${reason}\n` : '') +
     `آخر رسالة: ${lastMessage.slice(0, 500)}\n\n` +
     `الرد: افتح المحادثة في تطبيقك أو عبر لوحة التحكم.`;
