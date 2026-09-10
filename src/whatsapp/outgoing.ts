@@ -288,7 +288,7 @@ export async function notifyHumanAgent(sessionKey: string, customerName: string,
     `آخر رسالة: ${lastMessage.slice(0, 500)}\n\n` +
     `للرد مباشرة أرسل رسالتك من لوحة التحكم، أو اكتب *استلام* لإسناد المحادثة لك.`;
 
-  await sendText(agent, text, { phoneNumberId: agent.length > 12 ? undefined : undefined });
+  await sendText(agent, text);
 }
 
 // ─────────────────────────── داخلي ───────────────────────────

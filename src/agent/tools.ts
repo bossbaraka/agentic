@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { log, uid } from '../lib/utils.js';
-import { getPlan, MUREEH_PLANS, recommendPlan, type PlanId } from './plans.js';
+import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
 
 /**
  * أدوات البوت الخاصة بمنصة مُريح (Function Calling).
@@ -164,15 +164,15 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
     const lines = [
       `*${plan.name}*${plan.mostPopular ? ' ← الأكثر طلبًا' : ''} — ${plan.tagline}`,
       billing === 'monthly'
-        ? `السعر: *${plan.priceMonthly} ₪/شهر*`
+        ? `السعر: *${plan.priceMonthly} ₪/شهر* — ثابت مهما زادت طلباتك، وبدون رسوم مخفية`
         : `السعر السنوي: *${plan.priceYearly} ₪* دفعة واحدة (≈ ${plan.priceYearlyPerMonth} ₪/شهر)`,
     ];
     if (billing === 'monthly') {
       lines.push(`ولو دفعت سنوي: ${plan.priceYearlyPerMonth} ₪/شهر — توفير *${plan.yearlySavings} ₪* (~17%)`);
     }
-    lines.push('المزايا:');
+    lines.push('وش تحصل عليه:');
     for (const f of plan.features) lines.push(`• ${f}`);
-    lines.push('تبيني أجهّز لك التفعيل، أو تبي باقة ثانية؟');
+    lines.push('تبيني أجهّز لك التفعيل على هذي الباقة؟');
 
     log.tool(`get_plan_details → ${id} (${billing})`);
     return { ok: true, data: { plan: plan.id, billing, price: plan[billing === 'monthly' ? 'priceMonthly' : 'priceYearly'] }, userMessage: lines.join('\n') };
@@ -187,13 +187,14 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
 
     log.tool(`recommend_plan → ${p.id} (tables=${tables ?? '?'}, needs=${needs.join(',') || '—'})`);
 
+    const perTable = tables ? `، يعني ~*${perTableMonthly(p, tables)} ₪* بس للطاولة الواحدة` : '';
     return {
       ok: true,
       data: { recommended: p.id, priceMonthly: p.priceMonthly, priceYearly: p.priceYearly, reason: rec.reason },
       userMessage: [
-        `أنسب باقة لحالتك: *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`,
+        `أنسب باقة لحالتك: *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}${perTable}`,
         rec.reason + '.',
-        `ولو سنوي: ${p.priceYearlyPerMonth} ₪/شهر — توفير *${p.yearlySavings} ₪*، والترقية من اللوحة في أي وقت.`,
+        `ولو سنوي: ${p.priceYearlyPerMonth} ₪/شهر — توفير *${p.yearlySavings} ₪*، وبدون بطاقة للبدء، والترقية من اللوحة بأي وقت.`,
         'تبيني أجهّز لك التفعيل؟',
       ].join('\n'),
     };

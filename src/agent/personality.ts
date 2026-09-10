@@ -112,6 +112,13 @@ export function fallbackQuickReplies(intent?: string): QuickReply[] {
         { id: 'qr:yearly', title: 'وش توفير السنوي؟' },
         { id: 'qr:human', title: 'أريد موظف' },
       ];
+    case 'اعتراض_سعري':
+    case 'مقارنة_وضع_حالي':
+      return [
+        { id: 'qr:recommend', title: 'أنصحني بباقة' },
+        { id: 'qr:prices', title: 'الأسعار والباقات' },
+        { id: 'qr:activate', title: 'أبدأ التفعيل' },
+      ];
     case 'طلب_تفعيل':
       return [
         { id: 'qr:pro', title: 'الاحترافية' },
@@ -126,6 +133,40 @@ export function fallbackQuickReplies(intent?: string): QuickReply[] {
     default:
       return [];
   }
+}
+
+/**
+ * رد دافئ للحالات النادرة جدًا التي يتعذّر فيها توليد أي رد.
+ * القاعدة: لا لغة أعطال باردة («خلل تقني») — بل اعتراف بشري خفيف
+ * + طريق مختصر + سؤال واحد يُبقي المحادثة حيّة.
+ * (ملاذ أخير فقط — المسار الطبيعي يردّ دائمًا من Gemini أو الاحتياطي المحلي.)
+ */
+export function pickWarmFallbackReply(seed = Date.now()): { text: string; buttons: QuickReply[] } {
+  const variants: { text: string; buttons: QuickReply[] }[] = [
+    {
+      text: 'وصلتني رسالتك 👍 عشان أخدمك بأسرع وقت: تبي *شرح الباقات والأسعار*، ولا *أحسب لك الأنسب* حسب طاولاتك؟',
+      buttons: [
+        { id: 'qr:prices', title: 'الأسعار والباقات' },
+        { id: 'qr:recommend', title: 'أنصحني بباقة' },
+        { id: 'qr:activate', title: 'أبدأ التفعيل' },
+      ],
+    },
+    {
+      text: 'تمام، شفت رسالتك. خلّينا نختصر الطريق: كم طاولة تشتغل عندك؟ وأعطيك التوصية الدقيقة بالأسعار الرسمية.',
+      buttons: [
+        { id: 'qr:prices', title: 'الأسعار والباقات' },
+        { id: 'qr:activate', title: 'أبدأ التفعيل' },
+      ],
+    },
+    {
+      text: 'معك 🙏 أرسل طلبك بكلمات أبسط وأنا أرد عليك فورًا — أو اختر من هنا ونكمّل خطوة بخطوة.',
+      buttons: [
+        { id: 'qr:recommend', title: 'أنصحني بباقة' },
+        { id: 'qr:human', title: 'أريد موظف' },
+      ],
+    },
+  ];
+  return variants[Math.abs(seed) % variants.length];
 }
 
 /** هل النص يبدو تأكيدًا/موافقة؟ */

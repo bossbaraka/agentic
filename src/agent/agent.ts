@@ -18,6 +18,7 @@ import {
   dayPart,
   firstNameOf,
   pickInboundReaction,
+  pickWarmFallbackReply,
   typingDelayMs,
 } from './personality.js';
 import type {
@@ -251,6 +252,8 @@ export class AgentOrchestrator {
         const fname = firstNameOf(session.name);
         if (fname) extraBits.push(`[اسم العميل للنداء بلطف: ${fname} — ليس في كل رسالة.]`);
         extraBits.push(`[جزء اليوم: ${dayPart()} — حيِّ به فقط في أول تواصل أو بعد انقطاع.]`);
+        const sales = salesHint(batch.map((b) => b.body).join('\n'), session.summary);
+        if (sales) extraBits.push(sales);
         const inboundCount = session.messages.filter((m) => m.dir === 'in').length;
         if (inboundCount <= batch.length) {
           extraBits.push('[أول تواصل في هذه الجلسة — قدّم نفسك بجملة واحدة حيّة ثم اسأل سؤالًا واحدًا.]');
@@ -275,14 +278,28 @@ export class AgentOrchestrator {
             extraContext,
           });
         } catch (err) {
+          // ملاذ أخير نظريًا — generateReply نفسه لا يرمي خطأ (يردّ احتياطيًا).
+          // لو وصلنا هنا فهو خلل برمجي غير متوقع: نسجّله، ونردّ بدفء بشري.
           const message = (err as Error).message;
           log.error(`فشل توليد الرد لـ ${key}: ${message}`);
           store.recordUsage(key, { promptTokens: 0, candidatesTokens: 0, latencyMs: Date.now() - started, error: true });
-          this.emit({ t: 'error', sessionKey: key, message });
-          await sendOutbound(
-            key,
-            'عذرًا، حصل عندي خلل تقني بسيط 😔 أعد إرسال رسالتك وأنا أكمّل معك. أو اكتب */بشري* وأوصلك بزميل من الفريق.',
-          );
+          this.emit({ t: 'error', sessionKey: key, message: `فشل غير متوقع في توليد الرد: ${message}` });
+          const fb = pickWarmFallbackReply();
+          const sent = await sendOutbound(key, fb.text, {
+            contextMessageId: batch[batch.length - 1]?.waId,
+            buttons: fb.buttons,
+          });
+          if (sent.ok) {
+            const rec: StoredMessage = {
+              id: uid('out'), waId: sent.messageId, dir: 'out', type: 'text',
+              body: fb.text, createdAt: Date.now(), meta: { source: 'warm-fallback' },
+            };
+            store.addOutbound(key, rec);
+            this.emit({ t: 'outbound', sessionKey: key, name: session.name, message: rec, state: session.state });
+          } else {
+            log.error(`تعذّر إرسال الرد الاحتياطي لـ ${key}: ${sent.error ?? '؟'} — تحقق من توكن القناة`);
+            this.emit({ t: 'error', sessionKey: key, message: `فشل إرسال واتساب: ${sent.error ?? '؟'} — تحقق من WHATSAPP_ACCESS_TOKEN` });
+          }
           return;
         }
 
@@ -291,13 +308,21 @@ export class AgentOrchestrator {
           promptTokens: result.usage.promptTokens,
           candidatesTokens: result.usage.candidatesTokens,
           latencyMs: latency,
+          error: result.degraded === true,
         });
 
+        // وضع احتياطي؟ العميل حصل على رد مفيد — لكن صاحبه يجب أن يعرف السبب ويصلحه
+        if (result.degraded) {
+          log.warn(`⚠️ [${key}] رد احتياطي محلي — ${result.degradedReason ?? 'السبب غير معروف'}`);
+          this.emit({ t: 'error', sessionKey: key, message: `وضع احتياطي: ${result.degradedReason ?? ''}` });
+        }
+
         log.ai(
-          `${result.engine === 'mock' ? '🧪' : '✨'} [${key}] ${humanMs(latency)} · ` +
+          `${result.engine === 'mock' && !result.degraded ? '🧪' : result.degraded ? '⚠️' : '✨'} [${key}] ${humanMs(latency)} · ` +
           `${result.usage.promptTokens}↑/${result.usage.candidatesTokens}↓ · ` +
           `نية: ${result.intent ?? '؟'} · ${result.parts.length} جزء` +
-          (result.handoff ? ' · 🚨 تحويل بشري' : ''),
+          (result.handoff ? ' · 🚨 تحويل بشري' : '') +
+          (result.degraded ? ' · ⚠️ احتياطي محلي' : ''),
         );
 
         // بث الأدوات للوحة
@@ -306,6 +331,7 @@ export class AgentOrchestrator {
         }
 
         // (10) الإرسال — إيقاع بشري + أزرار على آخر جزء
+        let sendFailedNotified = false;
         for (let i = 0; i < result.parts.length; i++) {
           const part = result.parts[i];
           const last = i === result.parts.length - 1;
@@ -315,6 +341,13 @@ export class AgentOrchestrator {
             contextMessageId: i === 0 ? batch[batch.length - 1]?.waId : undefined,
             buttons: last ? result.quickReplies : undefined,
           });
+
+          // فشل الإرسال (توكن منتهٍ/رقم محظور...) — ننبّه صاحبه في اللوحة بدل الصمت
+          if (!sent.ok && !sendFailedNotified) {
+            sendFailedNotified = true;
+            log.error(`فشل إرسال الرد لـ ${key}: ${sent.error ?? '؟'} — تحقق من توكن القناة ورقم العميل`);
+            this.emit({ t: 'error', sessionKey: key, message: `فشل إرسال الرد: ${sent.error ?? '؟'} — تحقق من WHATSAPP_ACCESS_TOKEN` });
+          }
 
           const rec: StoredMessage = {
             id: uid('out'),
@@ -604,6 +637,32 @@ export class AgentOrchestrator {
 }
 
 type CommandName = 'bot' | 'human' | 'pause' | 'resume' | 'reset' | 'help';
+
+/**
+ * تلميح بيعي ذكي يُحقن في سياق النموذج حسب كلام العميل.
+ * يوجّه «الخبير البشري» لمعالجة الاعتراض الصحيح بدل الرد العام —
+ * سطر واحد خفيف، لا يُذكر اسمه للعميل أبدًا.
+ */
+function salesHint(userText: string, summary: string): string | null {
+  const t = `${userText}\n${summary}`.toLowerCase();
+
+  if (/غالي|غالية|سعر مرتفع|ميزانية|بفكر|افكر|أفكر|بعدين|مش متأكد|متردد|شور|استشير|فكر فيها/.test(t)) {
+    return '[دليل بيعي: العميل متردد/يعترض على السعر — عالج بجملة قيمة واحدة: قسّط السعر على الطاولة/اليوم، اذكر التوفير السنوي، وذكّر (بدون بطاقة للبدء + إلغاء/ترقية مرنة). ثم سؤال واحد صغير يقود للتفعيل. ممنوع الخصم أو الوعد به.]';
+  }
+  if (/عندي نظام|نظام ثاني|شغال ورقي|ورق|دفتر|اكسل|excel|ماشي الحال/.test(t)) {
+    return '[دليل بيعي: يقارن بوضعه الحالي — لا تسرد المزايا. اسأل عن أكبر ألم فيه (ضياع طلبات؟ بطء الذروة؟ حسابات آخر اليوم؟) ثم اربطه بميزة واحدة تحلّه بالضبط.]';
+  }
+  if (/معقد|صعب|كبير علي|ما افهم تقنية|موظفين كبار|خايف|صعب علينا/.test(t)) {
+    return '[دليل بيعي: خوف من التعقيد — طمئنه: يعمل على أجهزته الحالية بدون معدات، التفعيل خلال دقائق، والفريق يجهّز كل شيء معه خطوة بخطوة. ثم سؤال واحد.]';
+  }
+  if (/مطعم صغير|كشك|فود ترك|كافيه صغير|طاولات قليلة|عدد قليل|\b([1-9]|1[0-4])\s*(طاولة|طاولات|طاو)\b/.test(t)) {
+    return '[دليل بيعي: يظن النظام أكبر منه — وضّح أن الأساسية تبدأ من 149₪ وتعمل من أول طاولة، والترقية لاحقًا بضغطة من اللوحة. ثم سؤال واحد.]';
+  }
+  if (/فروع|سلسلة|سلاسل|فرع ثاني|فرع جديد/.test(t)) {
+    return '[دليل بيعي: عميل سلاسل/فروع (قيمة عالية) — ركّز على باقة المؤسسات: إدارة الفروع، السعة المفتوحة، النطاق الخاص، ومدير الحساب. اسأل عن عدد الفروع الحالي.]';
+  }
+  return null;
+}
 
 /** كشف لغة مبسّط (يُستخدم فقط لضبط لغة الجلسة) */
 export function detectLanguage(text: string): string | null {

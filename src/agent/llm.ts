@@ -1,9 +1,9 @@
 import { GoogleGenAI } from '@google/genai';
 import { config } from '../config.js';
-import { extractJson, log, retry, sanitizeForJson, sleep } from '../lib/utils.js';
+import { extractJson, log, retry, sanitizeForJson, sleep, splitText } from '../lib/utils.js';
 import type { MediaPart } from '../types.js';
 import { TOOL_DECLARATIONS, runTool, type ToolContext, type ToolResult } from './tools.js';
-import { getPlan, MUREEH_PLANS, recommendPlan } from './plans.js';
+import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan } from './plans.js';
 import {
   clampButtons,
   dayPart,
@@ -54,6 +54,13 @@ export interface AgentOutput {
   model: string;
   engine: 'gemini' | 'mock';
   rawText: string;
+  /**
+   * true عندما تعذّر الوصول لـ Gemini فأجاب البوت من بياناته المحلية الدقيقة
+   * (الأسعار والتوصيات من plans.ts) — العميل يحصل على رد مفيد دائمًا،
+   * وصاحب البوت يرى تنبيهًا في السجلات ولوحة التحكم لمعالجة السبب.
+   */
+  degraded?: boolean;
+  degradedReason?: string;
 }
 
 // ─────────────────────────── بناء Contents ───────────────────────────
@@ -131,8 +138,47 @@ function parseQuickReplies(raw: unknown): QuickReply[] {
   );
 }
 
-function parseAgentJson(text: string): ParsedReply {
-  const json = extractJson(text);
+/**
+ * استخراج reply_parts بالتعابير النظامية كحل أخير عندما يكون JSON مكسورًا
+ * (فاصلة زائدة، اقتباس ناقص...) — المهم: العميل لا يرى أقواسًا وأكوادًا أبدًا.
+ */
+function extractPartsByRegex(text: string): string[] {
+  const out: string[] = [];
+  // 1) مصفوفة reply_parts حتى لو كان باقي الكائن مكسورًا
+  const arrMatch = text.match(/"reply_parts"\s*:\s*\[([\s\S]*?)\]/);
+  const haystack = arrMatch ? arrMatch[1] : text;
+  const strRe = /"((?:[^"\\]|\\.)*)"/g;
+  let m: RegExpExecArray | null;
+  let guard = 0;
+  while ((m = strRe.exec(haystack)) && guard++ < 20) {
+    const s = m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').trim();
+    // تجاهل مفاتيح JSON نفسها لو التُقطت
+    if (!s || /^(reply_parts|quick_replies|handoff|handoff_reason|intent|sentiment|id|title)$/.test(s)) continue;
+    out.push(s);
+  }
+  return out;
+}
+
+/** هل يبدو النص كـ JSON (وليس كلامًا بشريًا)؟ */
+function looksLikeJson(text: string): boolean {
+  const t = text.trim();
+  return (
+    t.startsWith('{') ||
+    t.startsWith('```') ||
+    /"reply_parts"\s*:/.test(t) ||
+    /"quick_replies"\s*:/.test(t)
+  );
+}
+
+export function parseAgentJson(text: string): ParsedReply {
+  // محاولة 1: استخراج مباشر
+  let json = extractJson(text);
+
+  // محاولة 2: إصلاح شائع — فاصلة زائدة قبل } أو ]
+  if (!json) {
+    const repaired = text.replace(/,(\s*[}\]])/g, '$1');
+    if (repaired !== text) json = extractJson(repaired);
+  }
 
   if (json && typeof json === 'object' && !Array.isArray(json)) {
     const o = json as Record<string, any>;
@@ -143,7 +189,7 @@ function parseAgentJson(text: string): ParsedReply {
 
     const parts = rawParts
       .map((p: any) => (typeof p === 'string' ? p : p?.text ?? ''))
-      .map((p: string) => sanitizeForJson(p).trim())
+      .map((p: string) => sanitizeReplyPart(sanitizeForJson(p)))
       .filter((p: string) => p.length > 0);
 
     return {
@@ -158,20 +204,110 @@ function parseAgentJson(text: string): ParsedReply {
   }
 
   if (Array.isArray(json)) {
-    const parts = json.map((x: any) => (typeof x === 'string' ? x : String(x))).filter(Boolean);
+    const parts = json
+      .map((x: any) => (typeof x === 'string' ? x : String(x)))
+      .map((p: string) => sanitizeReplyPart(p))
+      .filter(Boolean);
     return { ok: true, parts, handoff: false, quickReplies: [] };
   }
 
-  const fallback = sanitizeForJson(text).trim();
+  // لا يوجد JSON صالح:
+  // - لو النص يشبه JSON مكسورًا → استخرج جمله بالتعابير النظامية
+  // - لو كلام عادي → عقّمه وأرسله كما هو
+  if (looksLikeJson(text)) {
+    const parts = extractPartsByRegex(text)
+      .map((p) => sanitizeReplyPart(p))
+      .filter((p) => p.length > 0);
+    if (parts.length > 0) {
+      log.warn('خرج النموذج بـ JSON مكسور — تم إنقاذ النص بالتعابير النظامية');
+      return { ok: true, parts, handoff: false, quickReplies: [] };
+    }
+    // JSON مكسور تمامًا ولا يمكن إنقاذه → لا نرسل الأقواس للعميل إطلاقًا
+    log.warn('خرج النموذج بـ JSON غير قابل للإنقاذ — سيُستخدم الرد الاحتياطي');
+    return { ok: false, parts: [], handoff: false, quickReplies: [] };
+  }
+
+  const fallback = sanitizeReplyPart(sanitizeForJson(text));
   if (!fallback) return { ok: false, parts: [], handoff: false, quickReplies: [] };
   return { ok: false, parts: [fallback], handoff: false, quickReplies: [] };
 }
 
+/**
+ * تعقيم أي نص خارج إلى العميل — خط الدفاع الأخير ضد «ظهور» أشياء غريبة:
+ * ملاحظات النظام الداخلية، بقايا JSON، أسوار الكود، ترويسات Markdown،
+ * جداول، ومعرّفات الأزرار الداخلية (qr:...).
+ */
+export function sanitizeReplyPart(raw: string): string {
+  let t = (raw ?? '').replace(/\r\n/g, '\n');
+
+  // 1) أسوار الكود: نحتفظ بالنص الداخلي فقط لو كان كلامًا، ونحذف JSON
+  t = t.replace(/```(?:json|JSON)?\s*([\s\S]*?)```/g, (_f, inner: string) => {
+    const s = String(inner ?? '').trim();
+    if (!s) return '';
+    if (looksLikeJson(s)) {
+      const rescued = extractPartsByRegex(s);
+      return rescued.length ? rescued.join('\n') : '';
+    }
+    return s;
+  });
+
+  // 2) سطور JSON المتناثرة (مفاتيح/أقواس وحيدة)
+  t = t
+    .split('\n')
+    .filter((line) => {
+      const s = line.trim();
+      if (!s) return true;
+      if (/^[{}\[\]",]+$/.test(s)) return false;
+      if (/^"(reply_parts|replyParts|reply|response|parts|quick_replies|quickReplies|buttons|handoff|handoff_reason|needs_human|escalate|intent|sentiment|id|title)"\s*:/.test(s)) return false;
+      return true;
+    })
+    .join('\n');
+
+  // 3) ملاحظات النظام الداخلية لو تسرّبت ([ملاحظة نظام: ...])
+  t = t.replace(/\[[^\]\n]{0,120}?(ملاحظة نظام|system note)[^\]\n]*\]/gi, '');
+
+  // 4) ترويسات Markdown وجداولها
+  t = t.replace(/^#{1,6}\s+/gm, '');
+  t = t.replace(/^\s*\|.*\|\s*$/gm, (row) =>
+    row.replace(/\|/g, ' ').replace(/\s{2,}/g, ' ').trim(),
+  );
+  t = t.replace(/\*\*/g, '*');
+
+  // 5) معرّفات الأزرار الداخلية لو ظهرت كنص
+  t = t.replace(/\(qr:[^)]*\)/gi, '');
+  t = t.replace(/\bqr:[a-z0-9_-]+\b/gi, '');
+
+  // 6) ترتيب نهائي
+  t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+
+  // سطر واحد متبقٍّ يبدو كـ JSON؟ لا نرسله.
+  if (t && looksLikeJson(t) && !/[ء-غف-يa-zA-Z]{8,}/.test(t.replace(/["{},\[\]:]/g, ' '))) return '';
+  return t;
+}
+
 function finishOutput(partial: Omit<AgentOutput, 'quickReplies'> & { quickReplies?: QuickReply[] }): AgentOutput {
+  // تعقيم أخير لكل الأجزاء + تقسيم الطويل منها حسب حد القناة
+  const clean: string[] = [];
+  for (const p of partial.parts ?? []) {
+    const s = sanitizeReplyPart(p);
+    if (!s) continue;
+    if (s.length > config.bot.MAX_SEGMENT_CHARS) {
+      clean.push(...splitText(s, config.bot.MAX_SEGMENT_CHARS));
+    } else {
+      clean.push(s);
+    }
+  }
+  const capped =
+    clean.length > config.bot.MAX_REPLY_PARTS
+      ? [
+          ...clean.slice(0, config.bot.MAX_REPLY_PARTS - 1),
+          clean.slice(config.bot.MAX_REPLY_PARTS - 1).join('\n'),
+        ]
+      : clean;
   const qr = partial.quickReplies?.length
     ? clampButtons(partial.quickReplies)
     : fallbackQuickReplies(partial.intent);
-  return { ...partial, quickReplies: qr };
+  return { ...partial, parts: capped, quickReplies: qr };
 }
 
 // ─────────────────────────── المحرك ───────────────────────────
@@ -189,20 +325,97 @@ function getClient(keyIndex?: number): GoogleGenAI {
   } as any);
 }
 
-async function callGemini(
+// ─────────────────────────── تشخيص أخطاء Gemini ───────────────────────────
+
+export type GeminiErrorKind =
+  | 'quota'           // 429 — حصة منتهية
+  | 'model_not_found' // 404 — الموديل غير موجود/متوقف
+  | 'invalid_key'     // مفتاح خاطئ أو صلاحيات
+  | 'timeout'         // انتهت المهلة
+  | 'network'         // شبكة / ضغط على خوادم Google (5xx)
+  | 'bad_request'     // طلب مرفوض (400)
+  | 'safety'          // حجب أمان
+  | 'unknown';
+
+export interface ClassifiedError {
+  kind: GeminiErrorKind;
+  /** رسالة عربية عملية لصاحب البوت (سجلات/لوحة — لا تظهر للعميل) */
+  hint: string;
+  /** هل تُجدي إعادة المحاولة؟ */
+  retryable: boolean;
+}
+
+export function classifyGeminiError(err: unknown): ClassifiedError {
+  const msg = String((err as any)?.message ?? err ?? '');
+  if (/429|RESOURCE_EXHAUSTED|quota|Quota exceeded|rate.?limit/i.test(msg)) {
+    return {
+      kind: 'quota',
+      hint: 'انتهت حصة Gemini (429) — أضف مفتاحًا آخر في GEMINI_API_KEY (افصل بفواصل) أو راجع الحصة في AI Studio',
+      retryable: true,
+    };
+  }
+  if (/404|NOT_FOUND|not found|is not found|unsupported model|Model .* does not|Publisher Model .* not found/i.test(msg)) {
+    return {
+      kind: 'model_not_found',
+      hint: `الموديل غير متوفر لدى Google — حدّث GEMINI_MODEL (الحالي: ${config.gemini.MODEL}). مقترح: gemini-2.5-flash أو gemini-3.5-flash-lite`,
+      retryable: false,
+    };
+  }
+  if (/API key not valid|API_KEY_INVALID|invalid api key|API key expired/i.test(msg)) {
+    return {
+      kind: 'invalid_key',
+      hint: 'مفتاح GEMINI_API_KEY غير صالح — أنشئ مفتاحًا جديدًا من aistudio.google.com/apikey',
+      retryable: false,
+    };
+  }
+  if (/PERMISSION_DENIED|403/i.test(msg)) {
+    return {
+      kind: 'invalid_key',
+      hint: 'رفض صلاحية من Google (403) — تحقق من المفتاح وتفعيل Generative Language API للمشروع',
+      retryable: false,
+    };
+  }
+  if (/aborted|abort|timeout|timed out|TIMEOUT|DEADLINE_EXCEEDED|ETIMEDOUT/i.test(msg)) {
+    return { kind: 'timeout', hint: 'انتهت مهلة الاتصال بـ Gemini — تُعاد المحاولة تلقائيًا', retryable: true };
+  }
+  if (/ENOTFOUND|ECONNRESET|ECONNREFUSED|EAI_AGAIN|fetch failed|network|socket hang up|UNAVAILABLE|50[023]|OVERLOADED|overloaded|Service Unavailable/i.test(msg)) {
+    return { kind: 'network', hint: 'عطل شبكة أو ضغط على خوادم Google — تُعاد المحاولة تلقائيًا', retryable: true };
+  }
+  if (/SAFETY|blocked|BLOCKED|finishReason/i.test(msg)) {
+    return { kind: 'safety', hint: 'حجب أمان من النموذج — لا يحتاج إجراءً منك', retryable: false };
+  }
+  if (/INVALID_ARGUMENT|\b400\b/i.test(msg)) {
+    return { kind: 'bad_request', hint: 'رفض Google الطلب (400) — راجع السجلات لتفاصيل الرسالة المسببة', retryable: false };
+  }
+  return { kind: 'unknown', hint: msg.slice(0, 220), retryable: true };
+}
+
+/**
+ * سلسلة الموديلات بالترتيب: الرئيسي ← السريع ← البدائل من الإعدادات.
+ * تُجرَّب تلقائيًا عند 404 أو نفاد الحصة — العميل لا يشعر بشيء.
+ */
+export function buildModelChain(): string[] {
+  const chain = [config.gemini.MODEL, config.gemini.FAST_MODEL, ...config.gemini.MODEL_FALLBACKS];
+  return [...new Set(chain.map((m) => (m ?? '').trim()).filter(Boolean))];
+}
+
+interface GeminiCallResult {
+  response: any;
+  /** الموديل الذي نجح فعلًا (قد يكون بديلًا) */
+  model: string;
+}
+
+/** استدعاء واحد بموديل ومفتاح محددين — مع مهلة إلغاء حقيقية */
+async function singleCall(
   contents: GeminiContent[],
   systemInstruction: string,
   toolsEnabled: boolean,
-  overrideModel?: string,
-  keyAttempt = 0,
+  model: string,
+  keyIndex: number,
 ): Promise<any> {
-  const keysCount = config.gemini.API_KEYS.length || 1;
-  const activeKeyIndex = (currentKeyIndex + keyAttempt) % keysCount;
-  const ai = getClient(activeKeyIndex);
-  const targetModel = overrideModel ?? config.gemini.MODEL;
-
+  const ai = getClient(keyIndex);
   const params: Record<string, any> = {
-    model: targetModel,
+    model,
     contents,
     config: {
       systemInstruction,
@@ -222,20 +435,11 @@ async function callGemini(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.gemini.TIMEOUT_MS);
   try {
-    const res = await (ai.models.generateContent as any)({ ...params, abortSignal: controller.signal });
-    currentKeyIndex = activeKeyIndex;
-    return res;
+    return await (ai.models.generateContent as any)({ ...params, abortSignal: controller.signal });
   } catch (err: any) {
-    const msg = String(err?.message ?? err);
-    if (/429|RESOURCE_EXHAUSTED|Quota exceeded/i.test(msg)) {
-      if (keyAttempt < keysCount - 1) {
-        log.warn(`⚠️ انتهت حصة المفتاح رقم ${activeKeyIndex + 1} — التبديل للمفتاح التالي...`);
-        return await callGemini(contents, systemInstruction, toolsEnabled, overrideModel, keyAttempt + 1);
-      }
-      if (targetModel !== config.gemini.FAST_MODEL) {
-        log.warn(`⚠️ انتهت حصة ${targetModel} على كافة المفاتيح — التحول للموديل الاحتياطي ${config.gemini.FAST_MODEL}`);
-        return await callGemini(contents, systemInstruction, toolsEnabled, config.gemini.FAST_MODEL, 0);
-      }
+    // رسالة أوضح عند الإلغاء بالمهلة بدل "aborted" المبهمة
+    if (controller.signal.aborted) {
+      throw new Error(`Gemini timeout after ${config.gemini.TIMEOUT_MS}ms (model=${model})`);
     }
     throw err;
   } finally {
@@ -244,8 +448,62 @@ async function callGemini(
 }
 
 /**
- * توليد الرد.
- * ينفّذ حلقة استدعاء الدوال حتى يعود النموذج برد نصي نهائي.
+ * الاستدعاء الذكي: يجوب الموديلات والمفاتيح تلقائيًا.
+ * - 404 على موديل → الموديل التالي في السلسلة
+ * - 429 على مفتاح → المفتاح التالي، ولو نفدت كلها → الموديل التالي (حصة مستقلة)
+ * - مفتاح خاطئ → تجربة باقي المفاتيح قبل الاستسلام
+ */
+async function callGemini(
+  contents: GeminiContent[],
+  systemInstruction: string,
+  toolsEnabled: boolean,
+): Promise<GeminiCallResult> {
+  const keysCount = config.gemini.API_KEYS.length || 1;
+  const models = buildModelChain();
+  let lastErr: unknown = new Error('لا توجد موديلات مضبوطة');
+
+  for (let mi = 0; mi < models.length; mi++) {
+    const model = models[mi];
+    const isLastModel = mi === models.length - 1;
+
+    for (let k = 0; k < keysCount; k++) {
+      const keyIndex = (currentKeyIndex + k) % keysCount;
+      try {
+        const response = await singleCall(contents, systemInstruction, toolsEnabled, model, keyIndex);
+        currentKeyIndex = keyIndex;
+        if (mi > 0) log.warn(`✅ نجح الموديل الاحتياطي: ${model} (الأساسي ${models[0]} متعذّر حاليًا)`);
+        return { response, model };
+      } catch (err) {
+        lastErr = err;
+        const c = classifyGeminiError(err);
+        const isLastKey = k === keysCount - 1;
+
+        if (c.kind === 'model_not_found') {
+          log.warn(`⚠️ الموديل ${model} غير متوفر (404) — ${isLastModel ? 'لا بدائل متبقية' : `تجربة ${models[mi + 1]}`}...`);
+          break; // لا فائدة من تجربة مفاتيح أخرى لنفس الموديل الميت
+        }
+        if (c.kind === 'quota' || c.kind === 'invalid_key') {
+          if (!isLastKey) {
+            log.warn(`⚠️ المفتاح ${keyIndex + 1}/${keysCount} (${c.kind}) — التبديل للمفتاح التالي...`);
+            continue;
+          }
+          if (c.kind === 'quota' && !isLastModel) {
+            log.warn(`⚠️ الحصة منتهية على كل المفاتيح لـ ${model} — تجربة ${models[mi + 1]} (حصة مستقلة)...`);
+            break;
+          }
+        }
+        throw err;
+      }
+    }
+  }
+
+  throw lastErr;
+}
+
+/**
+ * توليد الرد — بوابة آمنة لا ترمي خطأ للعميل أبدًا:
+ * عند فشل Gemini نهائيًا (حصة/مفتاح/شبكة) يردّ البوت من بياناته المحلية
+ * الدقيقة (نفس أسعار الباقات الرسمية) مع وسم degraded لتنبيه صاحبه.
  */
 export async function generateReply(input: AgentInput): Promise<AgentOutput> {
   const started = Date.now();
@@ -254,6 +512,32 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
     return mockReply(input, started);
   }
 
+  try {
+    return await generateReplyInner(input, started);
+  } catch (err) {
+    const c = classifyGeminiError(err);
+    log.error(`فشل Gemini نهائيًا (${c.kind}): ${(err as Error).message}`);
+    log.warn(`↩️ الرد الاحتياطي المحلي مفعّل — ${c.hint}`);
+    const fb = mockReply(input, started);
+    return { ...fb, degraded: true, degradedReason: `${c.kind}: ${c.hint}` };
+  }
+}
+
+/**
+ * الرد الاحتياطي المحلي — متاح للمنسّق أيضًا كملاذ أخير.
+ * يستخدم نفس بيانات الباقات الرسمية (plans.ts) فلا تخمين ولا أسعار خاطئة.
+ */
+export function offlineFallbackReply(input: AgentInput, reason: string): AgentOutput {
+  const fb = mockReply(input, Date.now());
+  return { ...fb, degraded: true, degradedReason: reason };
+}
+
+/**
+ * توليد الرد عبر Gemini.
+ * ينفّذ حلقة استدعاء الدوال حتى يعود النموذج برد نصي نهائي.
+ */
+async function generateReplyInner(input: AgentInput, started: number): Promise<AgentOutput> {
+  void started;
   const turns = normalizeTurns(input.turns);
 
   if (input.extraContext && turns.length) {
@@ -263,28 +547,35 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
 
   const contents: GeminiContent[] = turns.map(turnToContent);
 
+  // حماية: لا نرسل سجلًا فارغًا أبدًا (Google ترفضه بـ 400)
+  if (contents.length === 0) {
+    const lastUserText =
+      [...input.turns].reverse().find((t) => t.role === 'user')?.text?.trim() ||
+      '(رسالة فارغة)';
+    contents.push({ role: 'user', parts: [{ text: lastUserText }] });
+  }
+
   const toolsCalled: AgentOutput['toolsCalled'] = [];
   const sideEffects: { kind: string; payload: Record<string, unknown>; tool: string }[] = [];
   let promptTokens = 0;
   let candidatesTokens = 0;
   let finalText = '';
+  let modelUsed = config.gemini.MODEL;
   const toolFallbacks: string[] = [];
 
   const MAX_TOOL_LOOPS = 4;
 
   for (let loop = 0; loop <= MAX_TOOL_LOOPS; loop++) {
-    const response: any = await retry<any>(
+    const call = await retry<GeminiCallResult>(
       () => callGemini(contents, input.systemPrompt, input.toolsEnabled),
       {
         retries: config.gemini.RETRIES,
         label: 'استدعاء Gemini',
-        shouldRetry: (err) => {
-          const msg = (err as Error).message ?? '';
-          if (/API key not valid|PERMISSION_DENIED|INVALID_ARGUMENT/i.test(msg)) return false;
-          return true;
-        },
+        shouldRetry: (err) => classifyGeminiError(err).retryable,
       },
     );
+    const response: any = call.response;
+    modelUsed = call.model;
 
     promptTokens += response?.usageMetadata?.promptTokenCount ?? 0;
     candidatesTokens += response?.usageMetadata?.candidatesTokenCount ?? 0;
@@ -295,13 +586,13 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
       log.warn(`النموذج أنهى الرد بسبب: ${finish}${blockReason ? ` / ${blockReason}` : ''}`);
       if (finish === 'SAFETY' || blockReason) {
         return finishOutput({
-          parts: ['عذرًا، ما قدرت أعالج هذي الرسالة. ممكن توضح طلبك بطريقة ثانية؟ أنا معك.'],
+          parts: ['وصلتني — بس ما قدرت أعالج هذي الصيغة بالذات. وضّح لي طلبك بكلمات ثانية وأنا معك خطوة بخطوة 👍'],
           handoff: false,
           intent: 'عام',
           toolsCalled,
           sideEffects,
           usage: { promptTokens, candidatesTokens },
-          model: config.gemini.MODEL,
+          model: modelUsed,
           engine: 'gemini',
           rawText: `[finishReason=${finish}]`,
         });
@@ -371,7 +662,14 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
 
   if (outParts.length === 0) {
     if (toolFallbacks.length) outParts = toolFallbacks.slice(0, config.bot.MAX_REPLY_PARTS);
-    else if (!parsed.handoff) outParts = ['وصلتني رسالتك 👍 كيف أقدر أخدمك؟'];
+    else if (!parsed.handoff) {
+      // النموذج لم يخرج نصًا — رد بشري مفيد بدل الصمت أو رسالة خطأ باردة
+      outParts = [
+        'وصلتني رسالتك 👍 خلّيني أختصر عليك الطريق: أقدر أشرح لك *الباقات والأسعار*، أو *أحسب لك الأنسب* حسب عدد الطاولات، أو *أجهّز لك التفعيل* مباشرة.',
+        'من وين تحب نبدأ؟',
+      ];
+      if (!parsed.intent) parsed.intent = 'عام';
+    }
   }
 
   const supportTicket = toolsCalled.some((t) => t.name === 'create_support_ticket');
@@ -386,7 +684,7 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
     toolsCalled,
     sideEffects,
     usage: { promptTokens, candidatesTokens },
-    model: config.gemini.MODEL,
+    model: modelUsed,
     engine: 'gemini',
     rawText: finalText,
   });
@@ -513,8 +811,9 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
       const tables = Number(m[1]);
       const rec = recommendPlan({ tables });
       const p = rec.plan;
-      parts.push(`لـ*${tables} طاولة* أنصح بـ*${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' (الأكثر طلبًا)' : ''}.`);
-      parts.push(`${rec.reason}. والدفع السنوي يوفّر *${p.yearlySavings} ₪*. تبيني أجهّز لك التفعيل؟`);
+      const perTable = perTableMonthly(p, tables);
+      parts.push(`لـ*${tables} طاولة* أنصحك بـ*${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' (الأكثر طلبًا)' : ''}، يعني ~*${perTable} ₪* بس للطاولة الواحدة.`);
+      parts.push(`${rec.reason}، والدفع السنوي يوفّر عليك *${p.yearlySavings} ₪*. تبيني أجهّز لك التفعيل؟`);
     }
   }
 
@@ -570,6 +869,19 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
   if (parts.length === 0 && /شكرا|شكرًا|تمام|ممتاز|رائع|thanks|great|awesome/.test(text)) {
     intent = 'إيجابي';
     parts.push(`العفو${name ? ' ' + name : ''} 🙌 أي سؤال ثاني عن الباقات أو التفعيل، أنا هنا.`);
+  }
+
+  // اعتراض سعري / تردد — معالجة استشارية لا ضغط بيعي
+  if (parts.length === 0 && /غالي|غالية|سعر مرتفع|بفكر|افكر|أفكر|أفكّر|بعدين|مش متأكد|متردد|فكر فيها|ميزانية/.test(text)) {
+    intent = 'اعتراض_سعري';
+    parts.push(`${vocative}طبيعي تفكر بالسعر — وهذا سؤال الذكي 👍 خلّيني أوضح الصورة: *الباقة الاحترافية* *299 ₪/شهر*، ولو عندك 25 طاولة يعني ~*12 ₪* بس للطاولة — أقل من وجبة وحدة.`);
+    parts.push('وبدون بطاقة للبدء، وتقدر تلغي أو تغيّر الباقة بأي وقت. كم طاولة عندك؟ أحسب لك الرقم الدقيق.');
+  }
+
+  // يقارن بنظامه الحالي — سؤال تشخيصي واحد بدل سرد المزايا
+  if (parts.length === 0 && /عندي نظام|نظام ثاني|شغال ورقي|ورق|دفتر|اكسل|excel|ماشي الحال|مستورة/.test(text)) {
+    intent = 'مقارنة_وضع_حالي';
+    parts.push('ممتاز إن عندك نظام شغال — معناها مطعمك منظم أصلًا 👌 بس سؤال سريع: وش أكثر شيء يزعجك فيه؟ ضياع طلبات، بطء وقت الذروة، ولا الحسابات آخر اليوم؟');
   }
 
   if (parts.length === 0 && hasMedia) {
