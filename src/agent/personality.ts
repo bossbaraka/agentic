@@ -89,6 +89,60 @@ export function clampButtons(buttons: QuickReply[] | undefined | null): QuickRep
   return out;
 }
 
+/**
+ * أزرار متّسقة مع النص — تُبنى من الجملة الأخيرة حصرًا.
+ *
+ * قاعدتان من تجربة الواتساب:
+ *  1. سؤال مفتوح يطلب كتابة حرة (اسم، مدينة، عدد...) → بلا أزرار إطلاقًا.
+ *  2. نص يعرض خطوة → أزرار تعكس حرفيًا الخيارين (لا أزرار عن موضوع آخر).
+ *  3. التحويل لبشري/مدير → بلا أزرار (أي زر يشوّش المحادثة المحوّلة).
+ *
+ * لو لا نمط مطابق: تُقبل أزرار النموذج كما هي، وإلا الأزرار الاحتياطية.
+ */
+export function coherentQuickReplies(
+  lastText: string,
+  proposed: QuickReply[] | undefined | null,
+  intent?: string,
+  handoff?: boolean,
+): QuickReply[] {
+  // تحويل لبشري/مدير المنصة — لا أزرار بعد التحويل
+  if (handoff) return [];
+
+  const t = (lastText ?? '').trim();
+  if (!t) return [];
+
+  // نص يعرض تأكيد الطلب → الزران يعكسانه حرفيًا
+  if (/تأكيد الطلب|أكد الطلب/.test(t)) {
+    return clampButtons([
+      { id: 'qr:confirm', title: 'تأكيد الطلب' },
+      { id: 'qr:edit', title: 'تعديل' },
+    ]);
+  }
+
+  // تثبيت الباقة → موافقة/تغيير
+  if (/نثبت على|نثبت على/.test(t)) {
+    return clampButtons([
+      { id: 'qr:plan-yes', title: 'نعم ثبتها' },
+      { id: 'qr:edit', title: 'غيّر الباقة' },
+    ]);
+  }
+
+  // عرض التفعيل → ابدأ/سؤال (لا أزرار عن أسعار بعيدة عن الجملة)
+  if (/أجهّز لك التفعيل|أجهز لك التفعيل|نجهّزها/.test(t)) {
+    return clampButtons([
+      { id: 'qr:activate', title: 'جهز لي التفعيل' },
+      { id: 'qr:prices', title: 'عندي سؤال' },
+    ]);
+  }
+
+  // أسئلة مفتوحة تطلب كتابة حرة — الأزرار هنا نشاز
+  if (/شو اسمك|ما اسمك|اسمك\?|واسم المطعم|بأي مدينة|كم طاولة|كم فرع|وش تبي تعدّل|وش تبي تعدل|اكتب لي|وش أكثر|وش اكثر/.test(t)) {
+    return [];
+  }
+
+  return proposed?.length ? clampButtons(proposed) : fallbackQuickReplies(intent);
+}
+
 /** أزرار احتياطية ذكية حسب النية — إذا النموذج نسي quick_replies */
 export function fallbackQuickReplies(intent?: string): QuickReply[] {
   switch (intent) {

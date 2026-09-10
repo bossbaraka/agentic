@@ -57,6 +57,28 @@ export interface StoredMessage {
   meta?: Record<string, unknown>;
 }
 
+/** ملف مطعم أثناء التجهيز للإطلاق (يُجمَّع سؤالًا بعد سؤال) */
+export interface LaunchProfile {
+  full_name?: string;
+  restaurant_name?: string;
+  city?: string;
+  branches?: number;
+  tables?: number;
+  /** starter | pro | enterprise */
+  preferred_plan?: string;
+  whatsapp_number?: string;
+}
+
+/** حالة طلب الإطلاق في الجلسة (يظهر في لوحة التحكم) */
+export interface LaunchInfo {
+  status?: 'draft' | 'awaiting_confirmation' | 'confirmed';
+  /** نص «تصور الإطلاق» كما عُرض على العميل */
+  blueprint?: string;
+  orderRef?: string;
+  confirmedAt?: number;
+  updatedAt?: number;
+}
+
 /** جلسة/محادثة مع عميل واحد */
 export interface Session {
   /** رقم العميل (wa_id) */
@@ -67,6 +89,10 @@ export interface Session {
   language: string;
   /** ملخص تراكمي للمحادثة (يُبنى عند تجاوز السجل) */
   summary: string;
+  /** ملف التجهيز للإطلاق (إن بدأ مسار الاشتراك) */
+  profile?: LaunchProfile;
+  /** حالة طلب الإطلاق: تصور معروض / مؤكد عند مدير المنصة */
+  launch?: LaunchInfo;
   /** اسم الموظف/العميل كما يعرفه البوت */
   knownName?: string;
   createdAt: number;

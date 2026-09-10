@@ -2,16 +2,21 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { log, uid } from '../lib/utils.js';
+import { store } from '../lib/store.js';
+import { buildBlueprintText, managerOrderMessage, newOrderRef, normalizeProfile } from './onboarding.js';
 import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
+import type { LaunchProfile } from '../types.js';
 
 /**
  * أدوات البوت الخاصة بمنصة مُريح (Function Calling).
  *
- * الأدوات الأربع:
+ * الأدوات:
  *  1. get_plan_details          — تفاصيل باقة بالأسعار الدقيقة (من src/agent/plans.ts)
  *  2. recommend_plan            — توصية حتمية بالباقة حسب الطاولات والاحتياجات
  *  3. capture_subscription_lead — تسجيل ليد اشتراك + حفظ data/leads.json + تنبيه الفريق
  *  4. create_support_ticket     — فتح تذكرة دعم للمشتركين + حفظ data/tickets.json + تنبيه
+ *  5. build_launch_blueprint    — بناء «تصور الإطلاق» وعرضه على العميل قبل التأكيد
+ *  6. confirm_launch_order      — تأكيد الطلب بعد موافقة صريحة + إرسال الملف لمدير المنصة
  *
  * للتكامل مع نظام حقيقي: استبدل جسم كل دالة بنداء API — التوقيعات ثابتة.
  */
@@ -31,7 +36,7 @@ export interface ToolResult {
   userMessage?: string;
   /** إجراء جانبي يطلبه المنفّذ (مثل تنبيه الموظف) */
   sideEffect?: {
-    kind: 'send_media' | 'notify_human';
+    kind: 'send_media' | 'notify_human' | 'notify_manager';
     payload: Record<string, unknown>;
   };
 }
@@ -123,6 +128,49 @@ export const TOOL_DECLARATIONS = [
             },
           },
           required: ['restaurant_name', 'issue', 'priority'],
+        },
+      },
+      {
+        name: 'build_launch_blueprint',
+        description:
+          'بناء «تصور الإطلاق» الكامل لنسخة المطعم من بيانات التجهيز المجمّعة، لعرضه على العميل قبل تأكيد الطلب. استدعِها فقط بعد جمع: الاسم، اسم المطعم، المدينة، عدد الطاولات، والباقة المثبتة. اعرض النص الذي تعيده كاملًا كما هو دون تعديل، ثم اطلب تأكيد الطلب.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            full_name: { type: 'STRING', description: 'اسم العميل الكامل' },
+            restaurant_name: { type: 'STRING', description: 'اسم المطعم/المقهى' },
+            city: { type: 'STRING', description: 'مدينة المطعم' },
+            branches: { type: 'NUMBER', description: 'عدد الفروع (اختياري — الافتراضي 1)' },
+            tables: { type: 'NUMBER', description: 'عدد الطاولات' },
+            preferred_plan: {
+              type: 'STRING',
+              enum: ['starter', 'pro', 'enterprise'],
+              description: 'الباقة المثبتة مع العميل',
+            },
+          },
+          required: ['restaurant_name', 'city', 'tables', 'preferred_plan'],
+        },
+      },
+      {
+        name: 'confirm_launch_order',
+        description:
+          'تأكيد طلب الإطلاق نهائيًا: يولّد رقم طلب، يُرسل الملف الكامل لمدير المنصة تلقائيًا، وتُحوَّل المحادثة إليه. استدعِها فقط بعد موافقة صريحة من العميل على تصور إطلاق عُرض عليه قبلها. ممنوع استدعاؤها بدون عرض التصور أو بدون تأكيد واضح.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            full_name: { type: 'STRING', description: 'اسم العميل الكامل' },
+            restaurant_name: { type: 'STRING', description: 'اسم المطعم/المقهى' },
+            city: { type: 'STRING', description: 'مدينة المطعم' },
+            branches: { type: 'NUMBER', description: 'عدد الفروع (اختياري — الافتراضي 1)' },
+            tables: { type: 'NUMBER', description: 'عدد الطاولات' },
+            preferred_plan: {
+              type: 'STRING',
+              enum: ['starter', 'pro', 'enterprise'],
+              description: 'الباقة المثبتة مع العميل',
+            },
+            whatsapp_number: { type: 'STRING', description: 'رقم واتساب للتواصل (رقم العميل في الجلسة إن لم يذكر)' },
+          },
+          required: ['restaurant_name', 'city', 'tables', 'preferred_plan'],
         },
       },
     ],
@@ -282,7 +330,74 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
       },
     };
   },
+
+  /** بناء «تصور الإطلاق» وعرضه على العميل قبل التأكيد */
+  build_launch_blueprint(args, ctx) {
+    const profile: LaunchProfile = profileFromArgs(args, ctx);
+    const blueprint = buildBlueprintText(profile);
+
+    store.patchProfile(ctx.sessionKey, profile);
+    store.patchLaunch(ctx.sessionKey, { status: 'awaiting_confirmation', blueprint });
+    log.tool(`build_launch_blueprint → ${profile.restaurant_name} (${profile.preferred_plan})`);
+
+    return {
+      ok: true,
+      data: { status: 'awaiting_confirmation', blueprint },
+      userMessage:
+        `${blueprint}\n\n` +
+        'هذا تصور نسختك كاملًا 👆 لو كل شيء تمام اضغط *تأكيد الطلب* — وأي تعديل اكتبه لي.',
+    };
+  },
+
+  /** تأكيد الطلب نهائيًا — الملف الكامل لمدير المنصة وتحويل المحادثة إليه */
+  async confirm_launch_order(args, ctx) {
+    const profile: LaunchProfile = profileFromArgs(args, ctx);
+    const ref = newOrderRef();
+    const managerNote = managerOrderMessage(profile, ref, ctx.sessionKey);
+
+    store.patchProfile(ctx.sessionKey, profile);
+    store.patchLaunch(ctx.sessionKey, {
+      status: 'confirmed',
+      blueprint: buildBlueprintText(profile),
+      orderRef: ref,
+      confirmedAt: Date.now(),
+    });
+    log.tool(`confirm_launch_order → ${ref} | ${profile.restaurant_name} | ${profile.preferred_plan}`);
+
+    return {
+      ok: true,
+      data: {
+        order_ref: ref,
+        status: 'confirmed',
+        restaurant: profile.restaurant_name,
+        plan: profile.preferred_plan,
+      },
+      userMessage:
+        `تم تأكيد طلبك ✅ رقم الطلب: *${ref}*\n` +
+        `ملفك الكامل وصل *مدير المنصة* — يتواصل معك ويجهز نسختك، خلال دقائق عادة وبدون بطاقة للبدء 🚀`,
+      sideEffect: {
+        kind: 'notify_manager',
+        payload: { note: managerNote, orderRef: ref },
+      },
+    };
+  },
 };
+
+/** توحيد وسائل الأداة إلى ملف مطعم نظيف (رقم الجلسة يكفي عند غياب النص) */
+function profileFromArgs(args: Record<string, any>, ctx: ToolContext): LaunchProfile {
+  const wa = String(args.whatsapp_number ?? '').trim();
+  return normalizeProfile({
+    full_name: args.full_name,
+    restaurant_name: args.restaurant_name,
+    city: args.city,
+    branches: typeof args.branches === 'number' ? args.branches : undefined,
+    tables: typeof args.tables === 'number' ? args.tables : undefined,
+    preferred_plan: (['starter', 'pro', 'enterprise'].includes(args.preferred_plan)
+      ? args.preferred_plan
+      : undefined) as PlanId | undefined,
+    whatsapp_number: wa || (ctx.sessionKey.startsWith('tg:') ? undefined : ctx.sessionKey),
+  });
+}
 
 /** تنفيذ دالة بأمان مع التقاط أي خطأ */
 export async function runTool(

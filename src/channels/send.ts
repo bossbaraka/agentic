@@ -103,3 +103,24 @@ export async function notifyHuman(
   }
   await waNotifyHuman(key, customerName, lastMessage, reason);
 }
+
+/**
+ * إرسال طلب الإطلاق المؤكد لمدير المنصة (واتساب حصرًا — رقمه في
+ * WHATSAPP_MANAGER_NUMBER). يعيد true عند نجاح التسليم الفعلي.
+ */
+export async function notifyManager(note: string, orderRef?: string): Promise<boolean> {
+  const manager = (config.whatsapp.MANAGER_NUMBER || '').replace(/\D/g, '');
+  if (!manager) {
+    log.warn('WHATSAPP_MANAGER_NUMBER غير مضبوط — طلب الإطلاق ظهر في السجلات فقط.');
+    return false;
+  }
+
+  const header = orderRef ? '' : '🚀 *طلب إطلاق جديد*\n';
+  const r = await waSendText(manager, `${header}${note}`);
+  if (!r.ok) {
+    log.error(`فشل إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة: ${r.error ?? '؟'}`);
+    return false;
+  }
+  log.ok(`🚀 طلب الإطلاق ${orderRef ?? ''} وصل مدير المنصة (${manager})`);
+  return true;
+}

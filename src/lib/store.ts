@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
-import type { ConversationState, Session, StoredMessage } from '../types.js';
+import type { ConversationState, LaunchInfo, LaunchProfile, Session, StoredMessage } from '../types.js';
 import { log, uid } from './utils.js';
 
 /**
@@ -157,6 +157,22 @@ export class Store {
       s.language = lang;
       this.dirty = true;
     }
+  }
+
+  /** تحديث ملف التجهيز للإطلاق (دمج جزئي دون مسح الخانات الأخرى) */
+  patchProfile(key: string, patch: Partial<LaunchProfile>): void {
+    const s = this.get(key);
+    s.profile = { ...(s.profile ?? {}), ...patch };
+    s.updatedAt = Date.now();
+    this.dirty = true;
+  }
+
+  /** تحديث حالة طلب الإطلاق (تصور معروض / مؤكد برقم طلب) */
+  patchLaunch(key: string, patch: Partial<LaunchInfo>): void {
+    const s = this.get(key);
+    s.launch = { ...(s.launch ?? {}), ...patch, updatedAt: Date.now() };
+    s.updatedAt = Date.now();
+    this.dirty = true;
   }
 
   /** إضافة رسالة واردة */

@@ -10,6 +10,7 @@ import {
   fetchChannelMedia,
   markInbound,
   notifyHuman,
+  notifyManager,
   reactToInbound,
   sendOutbound,
   sendTyping,
@@ -365,6 +366,17 @@ export class AgentOrchestrator {
 
         // الإجراءات الجانبية
         for (const se of result.sideEffects) {
+          if (se.kind === 'notify_manager') {
+            const note = typeof se.payload?.note === 'string' ? (se.payload.note as string) : '';
+            const ref = typeof se.payload?.orderRef === 'string' ? (se.payload.orderRef as string) : undefined;
+            if (note) {
+              const ok = await notifyManager(note, ref);
+              if (!ok) {
+                this.emit({ t: 'error', sessionKey: key, message: `تعذّر إرسال طلب الإطلاق ${ref ?? ''} لمدير المنصة — راجع WHATSAPP_MANAGER_NUMBER` });
+              }
+            }
+            continue;
+          }
           if (se.kind === 'notify_human') {
             const note = typeof se.payload?.note === 'string' ? (se.payload.note as string) : '';
             const lastBody = batch[batch.length - 1]?.body ?? '';
@@ -379,11 +391,20 @@ export class AgentOrchestrator {
 
         // التحويل لبشري
         if (result.handoff) {
-          store.setState(key, 'human', `🚨 تحويل تلقائي لبشري: ${result.reason ?? 'طلب النموذج'}`);
-          store.recordHandoff(key);
-          this.emit({ t: 'status', sessionKey: key, state: 'human', note: result.reason });
-          await notifyHuman(key, session.name, batch.map((b) => b.body).join('\n'), result.reason);
-          log.warn(`🚨 ${key} → تحويل لموظف بشري (${result.reason ?? 'بدون سبب'})`);
+          if (result.orderRef) {
+            // طلب إطلاق مؤكد — الملف الكامل أُرسل لمدير المنصة عبر الإجراء الجانبي،
+            // فلا تنبيه عام إضافي (حتى لا يتشتت المدير برسالتين)
+            store.setState(key, 'human', `🚀 طلب إطلاق مؤكد ${result.orderRef} — حُوّل لمدير المنصة`);
+            store.recordHandoff(key);
+            this.emit({ t: 'status', sessionKey: key, state: 'human', note: result.reason });
+            log.ok(`🚀 ${key} → طلب إطلاق مؤكد ${result.orderRef} — المحادثة الآن مع مدير المنصة`);
+          } else {
+            store.setState(key, 'human', `🚨 تحويل تلقائي لبشري: ${result.reason ?? 'طلب النموذج'}`);
+            store.recordHandoff(key);
+            this.emit({ t: 'status', sessionKey: key, state: 'human', note: result.reason });
+            await notifyHuman(key, session.name, batch.map((b) => b.body).join('\n'), result.reason);
+            log.warn(`🚨 ${key} → تحويل لموظف بشري (${result.reason ?? 'بدون سبب'})`);
+          }
         }
 
         this.onInsight?.({
