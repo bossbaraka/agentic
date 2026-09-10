@@ -64,7 +64,7 @@ export const config = {
     FAST_MODEL: str('OPENAI_FAST_MODEL', 'gpt-4o-mini'),
     BASE_URL: str('OPENAI_BASE_URL', ''),
     TEMPERATURE: num('OPENAI_TEMPERATURE', 0.7),
-    MAX_TOKENS: num('OPENAI_MAX_TOKENS', 1024),
+    MAX_TOKENS: num('OPENAI_MAX_TOKENS', 1536),
     TIMEOUT_MS: num('OPENAI_TIMEOUT_MS', 45_000),
     RETRIES: num('OPENAI_RETRIES', 2),
   },
@@ -88,7 +88,7 @@ export const config = {
       'gemini-3-flash-preview',
     ]),
     TEMPERATURE: num('GEMINI_TEMPERATURE', 0.8),
-    MAX_OUTPUT_TOKENS: num('GEMINI_MAX_OUTPUT_TOKENS', 1024),
+    MAX_OUTPUT_TOKENS: num('GEMINI_MAX_OUTPUT_TOKENS', 1536),
     /**
      * ميزانية "التفكير" للنموذج:
      *  0  = أسرع وأرخص (مناسب لردود واتساب)
@@ -146,11 +146,15 @@ export const config = {
     BOT_NAME: str('BOT_NAME', 'مساعد'),
     BUSINESS_NAME: str('BUSINESS_NAME', 'الشركة'),
     DEFAULT_LANGUAGE: str('DEFAULT_LANGUAGE', 'ar'),
-    MAX_REPLY_PARTS: num('MAX_REPLY_PARTS', 3),
-    /** حد الرسالة الواحدة في واتساب = 4096. نترك هامش أمان */
-    MAX_SEGMENT_CHARS: num('MAX_SEGMENT_CHARS', 900),
-    /** عدد رسائل المحادثة المرسلة للنموذج */
-    HISTORY_TURNS: num('HISTORY_TURNS', 24),
+    /**
+     * الردود الغنية تُرسل على أجزاء قليلة حتى تبقى سهلة القراءة على الهاتف.
+     * يمكن تخفيضها في بيئة شديدة الحساسية للتكلفة عبر .env.
+     */
+    MAX_REPLY_PARTS: num('MAX_REPLY_PARTS', 4),
+    /** حد الرسالة الواحدة في واتساب = 4096. نترك هامش أمان مع مساحة لرد جميل ومفيد */
+    MAX_SEGMENT_CHARS: num('MAX_SEGMENT_CHARS', 1200),
+    /** عدد الرسائل الأخيرة المرسلة للنموذج (رسائل، لا كلمات) */
+    HISTORY_TURNS: num('HISTORY_TURNS', 36),
     /** دقيقة خمول بعدها تُعتبر الجلسة جديدة */
     SESSION_TTL_MINUTES: num('SESSION_TTL_MINUTES', 45),
     /** حد رسائل العميل في الدقيقة قبل كبح الإساءة */
