@@ -6,6 +6,7 @@ services:
     plan: free
     buildCommand: npm install && npm run build
     startCommand: npm start
+    healthCheckPath: /health
     envVars:
       - key: NODE_ENV
         value: production
@@ -19,3 +20,7 @@ services:
         value: business
       - key: WHATSAPP_ENABLED
         value: true
+      - key: KEEP_ALIVE_ENABLED
+        value: true
+      - key: KEEP_ALIVE_INTERVAL_MINUTES
+        value: 10

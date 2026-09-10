@@ -43,6 +43,14 @@ export const config = {
     DASHBOARD_PATH: str('DASHBOARD_PATH', '/admin'),
     /** كلمة مرور لوحة التحكم (مطلوبة في الإنتاج) */
     DASHBOARD_PASSWORD: str('DASHBOARD_PASSWORD', ''),
+    /** رابط الخدمة الخارجي على Render (يُحقن تلقائيًا من Render كـ RENDER_EXTERNAL_URL) */
+    RENDER_EXTERNAL_URL: str('RENDER_EXTERNAL_URL', ''),
+    /** رابط مخصص اختياري للـ keep-alive */
+    KEEP_ALIVE_URL: str('KEEP_ALIVE_URL', ''),
+    /** تفعيل فحص البقاء نشطًا لمنع خمول Render المجاني بعد 15 دقيقة */
+    KEEP_ALIVE_ENABLED: bool('KEEP_ALIVE_ENABLED', true),
+    /** الفاصل الزمني بالدقائق لطلب keep-alive (افتراضيًا 10 دقائق — قبل حد الـ 15 دقيقة) */
+    KEEP_ALIVE_INTERVAL_MINUTES: num('KEEP_ALIVE_INTERVAL_MINUTES', 10),
   },
 
   gemini: {

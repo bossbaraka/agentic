@@ -20,6 +20,7 @@ import {
   verifyTelegramSecret,
 } from './telegram/client.js';
 import { getDashboardHtml } from './dashboard/index.js';
+import { startKeepAlive, stopKeepAlive } from './lib/keepalive.js';
 
 /**
  * الخادم: يستقبل webhook من Meta، يمرره للمنسّق، ويقدّم لوحة تحكم حية.
@@ -34,6 +35,7 @@ const app = Fastify({
   logger: false, // نستخدم مسجّلنا الخاص
   bodyLimit: 8 * 1024 * 1024,
   trustProxy: true,
+  keepAliveTimeout: 65000,
 });
 
 // ─────────────────── الحفاظ على الجسم الخام للتحقق من التوقيع ───────────────────
@@ -111,6 +113,13 @@ app.get('/health', async () => ({
   },
   ...orchestrator.status(),
   stats: store.snapshot(),
+}));
+
+/** فحص خفيف لـ Keep-Alive ومنع خمول Render */
+app.get('/ping', async () => ({
+  ok: true,
+  pong: Date.now(),
+  uptime: Math.round(process.uptime()),
 }));
 
 /**
@@ -403,18 +412,26 @@ async function main() {
   ].join('\n');
 
   log.raw(banner);
+
+  // تشغيل خدمة Keep-Alive إذا توفر الرابط لمنع سبات Render
+  startKeepAlive();
 }
 
 // إغلاق نظيف
 for (const sig of ['SIGINT', 'SIGTERM'] as const) {
   process.on(sig, () => {
     log.warn(`إشارة ${sig} — حفظ البيانات وإغلاق...`);
+    stopKeepAlive();
     stopTelegramPolling();
     if (config.telegram.TOKEN && !config.env.DEMO_MODE) void deleteTelegramWebhook();
     store.close();
     app.close().then(() => process.exit(0)).catch(() => process.exit(0));
   });
 }
+
+process.on('uncaughtException', (err) => {
+  log.error(`Uncaught exception: ${err?.stack ?? err}`);
+});
 
 process.on('unhandledRejection', (reason) => {
   log.error(`Unhandled rejection: ${reason}`);
