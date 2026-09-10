@@ -91,8 +91,11 @@ export const config = {
     AUTO_REACTION: str('AUTO_REACTION', ''),
     /** رقم/معرّف الموظف البشري للتنبيه عند التحويل */
     HUMAN_AGENT_ID: str('HUMAN_AGENT_ID', ''),
-    /** رقم مدير المنصة (واتساب، أرقام فقط) — يستقبل طلبات الإطلاق المؤكدة */
-    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', ''),
+    /**
+     * رقم مدير المنصة (واتساب، أرقام فقط) — تُرسل إليه طلبات الإطلاق
+     * المؤكدة كاملةً فور تأكيد العميل، وتُحوَّل إليه المحادثة.
+     */
+    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', '970599891559'),
   },
 
   /** تيليجرام — القناة البديلة/المكمّلة */

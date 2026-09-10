@@ -104,23 +104,29 @@ export async function notifyHuman(
   await waNotifyHuman(key, customerName, lastMessage, reason);
 }
 
+/** تطبيع رقم هاتف لصيغة واتساب (أرقام فقط بدون + أو أصفار دولية) */
+export function normalizeWaNumber(raw: string): string {
+  let d = (raw ?? '').replace(/[^\d]/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  return d;
+}
+
 /**
- * إرسال طلب الإطلاق المؤكد لمدير المنصة (واتساب حصرًا — رقمه في
- * WHATSAPP_MANAGER_NUMBER). يعيد true عند نجاح التسليم الفعلي.
+ * إرسال ملف طلب الإطلاق المؤكد لمدير المنصة (واتساب دائمًا —
+ * حتى لو كانت محادثة العميل تيليجرام، فالمدير يستلم على واتساب).
  */
 export async function notifyManager(note: string, orderRef?: string): Promise<boolean> {
-  const manager = (config.whatsapp.MANAGER_NUMBER || '').replace(/\D/g, '');
-  if (!manager) {
-    log.warn('WHATSAPP_MANAGER_NUMBER غير مضبوط — طلب الإطلاق ظهر في السجلات فقط.');
+  const to = normalizeWaNumber(config.whatsapp.MANAGER_NUMBER || config.whatsapp.HUMAN_AGENT_ID);
+  if (!to) {
+    log.error('⛔ لا يوجد رقم مدير — اضبط WHATSAPP_MANAGER_NUMBER في .env (طلب الإطلاق محفوظ في data/orders.json واللوحة)');
     return false;
   }
-
-  const header = orderRef ? '' : '🚀 *طلب إطلاق جديد*\n';
-  const r = await waSendText(manager, `${header}${note}`);
-  if (!r.ok) {
-    log.error(`فشل إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة: ${r.error ?? '؟'}`);
+  if (waDisabled()) {
+    log.warn('⏸ واتساب موقوف — طلب الإطلاق يظهر في لوحة التحكم فقط.');
     return false;
   }
-  log.ok(`🚀 طلب الإطلاق ${orderRef ?? ''} وصل مدير المنصة (${manager})`);
-  return true;
+  log.wa(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة (${to.slice(0, 3)}…${to.slice(-4)})`);
+  const r = await waSendText(to, note);
+  if (!r.ok) log.error(`فشل إرسال طلب الإطلاق للمدير: ${r.error ?? '؟'}`);
+  return r.ok;
 }

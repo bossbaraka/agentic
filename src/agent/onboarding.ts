@@ -1,111 +1,167 @@
+import type { RestaurantProfile } from '../types.js';
+import { getPlan, perTableMonthly, type PlanId } from './plans.js';
+
 /**
- * مسار التجهيز للإطلاق (Onboarding → Launch).
+ * مسار التجهيز للإطلاق (Onboarding):
+ * جمع تفاصيل المطعم ← تصور كامل جاهز للإطلاق ← تأكيد الطلب ← تحويل لمدير المنصة.
  *
- * عندما يحسم العميل قرار الاشتراك، يجمع البوت تفاصيل مطعمه خطوة بخطوة،
- * ثم يبني «تصور إطلاق» كاملًا ويعرضه للتأكيد، وبعد موافقة صريحة يُرسَل
- * الملف الكامل لمدير المنصة (WHATSAPP_MANAGER_NUMBER) وتُحوَّل المحادثة إليه.
- *
- * كل الأرقام هنا تُقرأ من plans.ts حصرًا — لا تخمين ولا أسعار خارجية.
+ * كل النصوص هنا حتمية (deterministic) من البيانات الرسمية — لا تخمين ولا هلوسة:
+ * الأسعار من plans.ts، والتفاصيل من ملف المطعم الذي جمعه البوت.
  */
 
-import type { LaunchProfile } from '../types.js';
-import { getPlan, perTableMonthly, type MureehPlan, type PlanId } from './plans.js';
+export type ProfileField =
+  | 'full_name'
+  | 'restaurant_name'
+  | 'city'
+  | 'branches'
+  | 'tables'
+  | 'preferred_plan'
+  | 'menu_items'
+  | 'has_logo';
 
-/** ملف مطعم جاهز للتصور/الطلب — لا خانة فارغة تُخمَّن، تُعرض شرطة */
-export type { LaunchProfile };
+/** الحقول الأساسية التي لا يكتمل التصور بدونها — بالترتيب المنطقي للسؤال */
+export const REQUIRED_FIELDS: ProfileField[] = [
+  'full_name',
+  'restaurant_name',
+  'city',
+  'tables',
+  'preferred_plan',
+];
 
-/** الباقة الافتراضية عند غياب الاختيار — الاحترافية (الأكثر طلبًا) */
-const DEFAULT_PLAN: PlanId = 'pro';
+/** السؤال البشري المقترح لكل حقل (سؤال واحد فقط في كل رد) */
+export const FIELD_QUESTIONS: Record<ProfileField, string> = {
+  full_name: 'شو اسمك؟',
+  restaurant_name: 'واسم المطعم؟',
+  city: 'بأي مدينة المطعم؟',
+  branches: 'كم فرع عندك؟ (لو فرع واحد اكتب 1)',
+  tables: 'كم طاولة تشتغل عندك؟',
+  preferred_plan: 'أي باقة نثبت عليها: الأساسية، الاحترافية، ولا المؤسسات؟',
+  menu_items: 'تقريبًا كم صنف في المنيو؟ (رقم تقريبي يكفي)',
+  has_logo: 'الشعار والألوان جاهزين عندك؟ (نعم/لا — ولو لا نجهز لك هوية من عندنا)',
+};
+
+/** الحقول الأساسية الناقصة من الملف */
+export function missingRequired(profile: RestaurantProfile): ProfileField[] {
+  const miss: ProfileField[] = [];
+  if (!profile.full_name?.trim()) miss.push('full_name');
+  if (!profile.restaurant_name?.trim()) miss.push('restaurant_name');
+  if (!profile.city?.trim()) miss.push('city');
+  if (!profile.tables || profile.tables <= 0) miss.push('tables');
+  if (!profile.preferred_plan) miss.push('preferred_plan');
+  return miss;
+}
+
+/** هل الملف جاهز لبناء التصور؟ */
+export function isProfileReady(profile: RestaurantProfile): boolean {
+  return missingRequired(profile).length === 0;
+}
+
+/** أول سؤال ناقص (يوجه النموذج لأهم خطوة تالية) */
+export function nextQuestion(profile: RestaurantProfile): string | null {
+  const miss = missingRequired(profile);
+  if (miss.length === 0) return null;
+  return FIELD_QUESTIONS[miss[0]!];
+}
+
+const PLAN_AR: Record<PlanId, string> = {
+  starter: 'الأساسية',
+  pro: 'الاحترافية',
+  enterprise: 'المؤسسات',
+};
 
 /**
- * استخراج معرّف الباقة من نص عربي حر (اسم الباقة أو سعرها أو معرّفها).
- * ترتيب الفحص مهم: الأسماء الأطول أولًا حتى لا تلتهم أسماء مشابهة.
+ * بناء «التصور الكامل الجاهز للإطلاق» — نص يُعرض على العميل للمراجعة
+ * قبل التأكيد. كل الأرقام من البيانات الرسمية.
  */
-export function planIdFromText(text: string | null | undefined): PlanId | null {
-  const t = (text ?? '').toLowerCase();
-  if (!t) return null;
-  if (/مؤسسات|سلاسل|سلسلة|فروع متعددة|multi.?branch|enterprise|799/.test(t)) return 'enterprise';
-  if (/احتراف|pro\b|299/.test(t)) return 'pro';
-  if (/أساسية|اساسية|starter|149/.test(t)) return 'starter';
-  return null;
-}
+export function buildBlueprintText(profile: RestaurantProfile): string {
+  const plan = getPlan((profile.preferred_plan ?? 'pro') as PlanId);
+  const tables = profile.tables ?? 0;
+  const branches = profile.branches && profile.branches > 0 ? profile.branches : 1;
+  const perTable = tables > 0 ? ` (~*${perTableMonthly(plan, tables)} ₪* للطاولة)` : '';
 
-/** اسم الباقة بالعربية كما يراها العميل */
-export function planNameOf(id: PlanId | string | undefined): string {
-  return getPlan(planIdFromText(String(id ?? '')) ?? DEFAULT_PLAN).name;
-}
-
-/** توحيد الملف قبل بناء أي نص — تنظيف نصي بسيط وتثبيت الافتراضيات */
-export function normalizeProfile(p: Partial<LaunchProfile>): LaunchProfile {
-  const clean = (v: unknown): string | undefined => {
-    const s = String(v ?? '').trim();
-    return s && s !== 'undefined' && s !== 'null' ? s : undefined;
-  };
-  const plan: PlanId = planIdFromText(String(p.preferred_plan ?? '')) ?? DEFAULT_PLAN;
-  return {
-    full_name: clean(p.full_name),
-    restaurant_name: clean(p.restaurant_name),
-    city: clean(p.city),
-    branches: typeof p.branches === 'number' && p.branches > 0 ? Math.round(p.branches) : 1,
-    tables: typeof p.tables === 'number' && p.tables > 0 ? Math.round(p.tables) : undefined,
-    preferred_plan: plan,
-    whatsapp_number: clean(p.whatsapp_number),
-  };
-}
-
-/**
- * «تصور الإطلاق» — النص الكامل الذي يُعرض على العميل للتأكيد.
- * يُعرض كما هو حرفيًا (ممنوع تعديله أو اختصاره في الرد).
- */
-export function buildBlueprintText(rawProfile: Partial<LaunchProfile>): string {
-  const p = normalizeProfile(rawProfile);
-  const plan = getPlan(planIdFromText(String(p.preferred_plan ?? '')) ?? DEFAULT_PLAN);
-  const perTable = p.tables ? ` (~*${perTableMonthly(plan, p.tables)} ₪* للطاولة)` : '';
-
-  const lines: string[] = [
-    `🚀 *تصور الإطلاق — ${p.restaurant_name ?? 'مطعمك'}*`,
-    '',
-    `👤 ${p.full_name ?? '—'} · 📍 ${p.city ?? '—'}`,
-    `🍽️ ${(p.branches ?? 1) > 1 ? `${p.branches} فروع` : 'فرع واحد'} · ${p.tables ? `${p.tables} طاولة` : 'عدد الطاولات —'}`,
-    `💎 *${plan.name}* — *${plan.priceMonthly} ₪/شهر*${perTable}`,
-    '',
-    'وش يحصل عليه مطعمك:',
-    ...plan.features.map((f) => `• ${f}`),
-    '',
-    '⏱️ التجهيز والتفعيل خلال دقائق — وبدون بطاقة ائتمانية للبدء.',
+  const setup: string[] = [
+    `• بطاقات QR أنيقة لكل طاولة${tables > 0 ? ` (${tables} بطاقة)` : ''}`,
+    `• المنيو الرقمي بالصور + كاشير وتصفية فواتير`,
   ];
-  return lines.join('\n');
+  if (plan.id === 'pro' || plan.id === 'enterprise') {
+    setup.push('• شاشة المطبخ الحية KDS بتنبيهات صوتية + نقطة بيع POS');
+    setup.push('• تحليلات المبيعات + الهوية البصرية (شعارك وألوانك)');
+  }
+  if (plan.id === 'enterprise') {
+    setup.push(`• إدارة ${branches > 1 ? `${branches} فروع` : 'الفروع'} + نطاق خاص + مدير حساب`);
+  }
+  if (!profile.has_logo && (plan.id === 'pro' || plan.id === 'enterprise')) {
+    setup.push('• تجهيز هوية بصرية مؤقتة حتى يجهز شعارك');
+  }
+  setup.push('• حسابات الطاقم بدخول PIN (نادل/شيف/كاشير)');
+
+  const lines = [
+    `🚀 *تصور الإطلاق — ${profile.restaurant_name ?? 'مطعمك'}*`,
+    `${profile.city ?? ''}${branches > 1 ? ` · ${branches} فروع` : ''}${tables > 0 ? ` · ${tables} طاولة` : ''}`,
+    '',
+    `*الباقة:* ${plan.name}${plan.mostPopular ? ' (الأكثر طلبًا)' : ''}`,
+    `*السعر:* *${plan.priceMonthly} ₪/شهر*${perTable} — ثابت وبدون رسوم مخفية`,
+    `*السنوي:* ${plan.priceYearly} ₪ دفعة واحدة — توفير *${plan.yearlySavings} ₪*`,
+    '',
+    '*وش بنجهز لك:*',
+    ...setup,
+    '',
+    '*خطوات الإطلاق:*',
+    '1. تأكيد الطلب منك (أنت هنا الآن 👇)',
+    '2. مدير المنصة يستلم ملفك ويجهز نسختك — خلال دقائق عادة',
+    '3. تجربة طلب حي من طاولة حقيقية قبل الافتتاح الرسمي',
+    '',
+    'بدون بطاقة للبدء، وترقية/إلغاء مرنة بأي وقت.',
+  ];
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** سطر الطلب المختصر (يُحفظ مع الطلب المؤكد) */
+export function orderSummaryLine(profile: RestaurantProfile, orderRef: string): string {
+  const plan = getPlan((profile.preferred_plan ?? 'pro') as PlanId);
+  return (
+    `${orderRef} | ${profile.restaurant_name ?? '—'} (${profile.city ?? '—'}) | ` +
+    `${profile.tables ?? '؟'} طاولة | ${PLAN_AR[plan.id]} ${plan.priceMonthly}₪/شهر | ` +
+    `${profile.full_name ?? '—'} ${profile.whatsapp_number ?? ''}`.trim()
+  );
 }
 
 /**
- * ملف الطلب الكامل المُرسل لمدير المنصة بعد التأكيد.
- * رسالة داخلية للفريق — لا تُرسل للعميل أبدًا.
+ * رسالة مدير المنصة — الملف الكامل للطلب المؤكد.
+ * تُرسل واتساب لرقم المدير فور تأكيد العميل.
  */
 export function managerOrderMessage(
-  rawProfile: Partial<LaunchProfile>,
+  profile: RestaurantProfile,
   orderRef: string,
   sessionKey: string,
 ): string {
-  const p = normalizeProfile(rawProfile);
-  const plan: MureehPlan = getPlan(planIdFromText(String(p.preferred_plan ?? '')) ?? DEFAULT_PLAN);
-  const perTable = p.tables ? ` (~${perTableMonthly(plan, p.tables)} ₪/طاولة)` : '';
+  const plan = getPlan((profile.preferred_plan ?? 'pro') as PlanId);
+  const tables = profile.tables ?? 0;
+  const branches = profile.branches && profile.branches > 0 ? profile.branches : 1;
 
-  return [
-    `🚀 *طلب إطلاق مؤكد* ${orderRef}`,
+  const lines = [
+    `🚀 *طلب إطلاق جديد مؤكد* ${orderRef}`,
     '',
-    `العميل: ${p.full_name ?? '—'}`,
-    `المطعم: ${p.restaurant_name ?? '—'} — ${p.city ?? '—'}`,
-    `الفروع: ${p.branches ?? 1} · الطاولات: ${p.tables ?? '—'}`,
-    `الباقة: *${plan.name}* — ${plan.priceMonthly} ₪/شهر${perTable}`,
-    `واتساب العميل: ${p.whatsapp_number ?? sessionKey}`,
-    `مفتاح الجلسة: ${sessionKey}`,
-    `وقت التأكيد: ${new Date().toISOString()}`,
-    '',
-    'المطلوب: التواصل مع العميل مباشرة وإكمال التجهيز للإطلاق.',
-  ].join('\n');
+    `👤 العميل: ${profile.full_name ?? '—'}`,
+    `🍽️ المطعم: ${profile.restaurant_name ?? '—'} — ${profile.city ?? '—'}`,
+    `📍 الفروع: ${branches} · الطاولات: ${tables || '—'} · الأصناف: ${profile.menu_items ?? '—'}`,
+    `📦 الباقة: *${plan.name}* — *${plan.priceMonthly} ₪/شهر*` +
+      (tables > 0 ? ` (~${perTableMonthly(plan, tables)} ₪/طاولة)` : ''),
+    `💳 السنوي المتاح: ${plan.priceYearly} ₪ (توفير ${plan.yearlySavings} ₪)`,
+    `🎨 الشعار: ${profile.has_logo === true ? 'جاهز عند العميل' : profile.has_logo === false ? 'غير جاهز — جهزوا هوية مؤقتة' : 'غير معروف'}`,
+    `📱 واتساب العميل: ${profile.whatsapp_number ?? sessionKey}`,
+    `🔑 الجلسة: ${sessionKey}`,
+  ];
+  if (profile.notes?.trim()) lines.push(`📝 ملاحظات: ${profile.notes.trim().slice(0, 300)}`);
+  lines.push('', 'المحادثة حُوّلت لك — أكمل مع العميل تجهيز النسخة.');
+  return lines.join('\n');
 }
 
-/** توليد مرجع طلب قصير ومقروء: ORD-XXXXXX */
-export function newOrderRef(): string {
-  return `ORD-${Date.now().toString(36).toUpperCase().slice(-6)}`;
+/** استخراج اسم الباقة من نص حر (يُستخدم عند تأكيد العميل الشفهي) */
+export function planIdFromText(text: string): PlanId | null {
+  const t = (text ?? '').toLowerCase();
+  if (/مؤسس|enterprise|سلاسل/.test(t)) return 'enterprise';
+  if (/احتراف|pro|المتكامل/.test(t)) return 'pro';
+  if (/أساس|starter/.test(t)) return 'starter';
+  return null;
 }

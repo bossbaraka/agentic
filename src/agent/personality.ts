@@ -89,60 +89,6 @@ export function clampButtons(buttons: QuickReply[] | undefined | null): QuickRep
   return out;
 }
 
-/**
- * أزرار متّسقة مع النص — تُبنى من الجملة الأخيرة حصرًا.
- *
- * قاعدتان من تجربة الواتساب:
- *  1. سؤال مفتوح يطلب كتابة حرة (اسم، مدينة، عدد...) → بلا أزرار إطلاقًا.
- *  2. نص يعرض خطوة → أزرار تعكس حرفيًا الخيارين (لا أزرار عن موضوع آخر).
- *  3. التحويل لبشري/مدير → بلا أزرار (أي زر يشوّش المحادثة المحوّلة).
- *
- * لو لا نمط مطابق: تُقبل أزرار النموذج كما هي، وإلا الأزرار الاحتياطية.
- */
-export function coherentQuickReplies(
-  lastText: string,
-  proposed: QuickReply[] | undefined | null,
-  intent?: string,
-  handoff?: boolean,
-): QuickReply[] {
-  // تحويل لبشري/مدير المنصة — لا أزرار بعد التحويل
-  if (handoff) return [];
-
-  const t = (lastText ?? '').trim();
-  if (!t) return [];
-
-  // نص يعرض تأكيد الطلب → الزران يعكسانه حرفيًا
-  if (/تأكيد الطلب|أكد الطلب/.test(t)) {
-    return clampButtons([
-      { id: 'qr:confirm', title: 'تأكيد الطلب' },
-      { id: 'qr:edit', title: 'تعديل' },
-    ]);
-  }
-
-  // تثبيت الباقة → موافقة/تغيير
-  if (/نثبت على|نثبت على/.test(t)) {
-    return clampButtons([
-      { id: 'qr:plan-yes', title: 'نعم ثبتها' },
-      { id: 'qr:edit', title: 'غيّر الباقة' },
-    ]);
-  }
-
-  // عرض التفعيل → ابدأ/سؤال (لا أزرار عن أسعار بعيدة عن الجملة)
-  if (/أجهّز لك التفعيل|أجهز لك التفعيل|نجهّزها/.test(t)) {
-    return clampButtons([
-      { id: 'qr:activate', title: 'جهز لي التفعيل' },
-      { id: 'qr:prices', title: 'عندي سؤال' },
-    ]);
-  }
-
-  // أسئلة مفتوحة تطلب كتابة حرة — الأزرار هنا نشاز
-  if (/شو اسمك|ما اسمك|اسمك\?|واسم المطعم|بأي مدينة|كم طاولة|كم فرع|وش تبي تعدّل|وش تبي تعدل|اكتب لي|وش أكثر|وش اكثر/.test(t)) {
-    return [];
-  }
-
-  return proposed?.length ? clampButtons(proposed) : fallbackQuickReplies(intent);
-}
-
 /** أزرار احتياطية ذكية حسب النية — إذا النموذج نسي quick_replies */
 export function fallbackQuickReplies(intent?: string): QuickReply[] {
   switch (intent) {
@@ -184,9 +130,90 @@ export function fallbackQuickReplies(intent?: string): QuickReply[] {
         { id: 'qr:activate', title: 'أبدأ التفعيل' },
         { id: 'qr:prices', title: 'الباقات' },
       ];
+    case 'تأكيد_طلب':
+      return [
+        { id: 'qr:confirm', title: 'تأكيد الطلب' },
+        { id: 'qr:edit', title: 'تعديل' },
+      ];
+    case 'تجهيز_إطلاق':
+    case 'بيانات_تفعيل':
+      // جمع التفاصيل أسئلة مفتوحة (اسم/مدينة/عدد) — الأزرار هنا نشاز
+      return [];
     default:
       return [];
   }
+}
+
+/**
+ * هل تنتهي الرسالة بسؤال مفتوح يطلب كتابة حرة (اسم/مدينة/عدد/وصف)؟
+ * في هذه الحالة أي أزرار ستكون نشازًا — تُحذف كلها.
+ */
+export function endsWithOpenQuestion(text: string): boolean {
+  const tail = (text ?? '').trim().slice(-160);
+  if (!tail) return false;
+  // سؤال صريح بعلامة استفهام يطلب معلومة حرة
+  if (/؟\s*$/.test(tail) && /(اسم|الاسم|مدينة|بأي|كم|عدد|رقم|هاتف|جوال|مشكلة|صِف|صف|اشرح|وضّح|وضح|التفاصيل|تفاصيل|عنوان|شعار|صنف|فرع)/.test(tail)) {
+    return true;
+  }
+  // صيغ طلب مباشرة بدون علامة استفهام
+  if (/(شو اسمك|واسم المطعم|اسم المطعم|بأي مدينة|كم طاولة|كم فرع|أرسل|ابعت|اكتب)\s*؟?\s*$/.test(tail)) {
+    return true;
+  }
+  return false;
+}
+
+/** كلمات مفتاحية لمعنى الزر (لمطابته مع النص) */
+function buttonKeywords(b: QuickReply): string[] {
+  const id = (b.id || '').toLowerCase();
+  const t = (b.title || '').toLowerCase();
+  const words: string[] = [];
+  if (/confirm/.test(id) || /تأكيد|أكّد/.test(t)) words.push('تأكيد', 'أكّد', 'تمام');
+  if (/ثبت/.test(t)) words.push('ثبت');
+  if (/edit|modify/.test(id) || /تعديل|غيّر|غير/.test(t)) words.push('تعديل', 'غيّر', 'تغيير');
+  if (/prices|starter|pro|enterprise/.test(id) || /باق|سعر|أسعار|أساسية|احترافية|مؤسسات|149|299|799/.test(t)) words.push('باق', 'سعر', 'أسعار', 'أساسية', 'احترافية', 'مؤسسات');
+  if (/activate/.test(id) || /تفعيل|اشتر|ابدأ|أبدأ|نبدأ/.test(t)) words.push('تفعيل', 'اشتر', 'ابدأ', 'نبدأ', 'أجهّز');
+  if (/recommend/.test(id) || /أنصح|الأنسب/.test(t)) words.push('أنصح', 'أنسب', 'طاولة');
+  if (/yearly/.test(id) || /سنوي|توفير/.test(t)) words.push('سنوي', 'توفير');
+  if (/human/.test(id) || /موظف|بشري/.test(t)) words.push('موظف', 'بشري', 'فريق');
+  return words;
+}
+
+/**
+ * ضمان اتساق الأزرار مع المكتوب — الأزرار امتداد للجملة الأخيرة فقط:
+ * 1. تحويل لبشري ← بلا أزرار (الموظف يستلم، والأزرار تشوّش)
+ * 2. سؤال مفتوح (اسم/عدد/وصف) ← بلا أزرار
+ * 3. أزرار مقترحة ← تُحذف التي لا يذكر النص معناها (باستثناء زر التعديل/الموظف كبديل آمن)
+ * 4. لا أزرار مقترحة ← بدائل النية إن كان النص يسمح
+ */
+export function coherentQuickReplies(
+  lastText: string,
+  proposed: QuickReply[] | undefined | null,
+  intent?: string,
+  handoff = false,
+): QuickReply[] {
+  const text = (lastText ?? '').toLowerCase();
+
+  if (handoff) return [];
+  if (endsWithOpenQuestion(lastText)) return [];
+
+  const safe = clampButtons(proposed);
+  if (safe.length > 0) {
+    const kept = safe.filter((b) => {
+      const id = (b.id || '').toLowerCase();
+      // زرّا التعديل والموظف بديلان آمنان دائمًا (خروج من المأزق)
+      if (/qr:(edit|human)/.test(id)) return true;
+      const keys = buttonKeywords(b);
+      if (keys.length === 0) return true; // زر غير مصنّف — نثق بالنموذج
+      return keys.some((k) => text.includes(k));
+    });
+    // لو النص يعرض خيارين صريحين (A ولا B) نحتفظ بالمطابق فقط
+    if (/ولا| أو | أم /.test(text) && kept.length > 0) return kept.slice(0, 3);
+    if (kept.length > 0) return kept;
+    // كل المقترح لا يمتّ للنص بصلة ← الأفضل بلا أزرار من أزرار نشاز
+    return [];
+  }
+
+  return fallbackQuickReplies(intent);
 }
 
 /**
