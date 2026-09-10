@@ -82,12 +82,16 @@ export class AgentOrchestrator {
     const key = msg.from;
     log.wa(`← ${msg.contactName} (${key}): [${msg.type}] ${truncate(msg.body, 70)}`);
 
-    // تحديث اسم العميل من ملفه الشخصي
+    // تحديث اسم العميل من ملفه الشخصي. اسم العرض القادم من القناة ذاكرة مفيدة؛
+    // نثبته كاسم أولي حتى لا نسأل «شو اسمك؟» إذا كان معروفًا أصلًا.
     store.setName(key, msg.contactName);
     if (msg.telegramUsername) {
       store.patchProfile(key, { telegram_username: msg.telegramUsername });
     }
     const session = store.get(key);
+    if (!session.profile?.full_name && usableContactName(msg.contactName, key)) {
+      store.patchProfile(key, { full_name: msg.contactName.trim() });
+    }
 
     // (2) تعليم كمقروءة + مؤشر الكتابة (قبل أي معالجة ثقيلة)
     void markInbound(key, msg.waId);
@@ -202,8 +206,12 @@ export class AgentOrchestrator {
           return;
         }
 
-        // استخراج فوري وتلقائي لأي بيانات يذكرها العميل وتثبيتها في الذاكرة الدائمة
-        const extracted = autoExtractFacts(batch.map((b) => b.body), session.profile);
+        // استخراج فوري وتلقائي لأي بيانات يذكرها العميل وتثبيتها في الذاكرة الدائمة.
+        // نمرر آخر سؤال للبوت حتى تُفهم الإجابات القصيرة مثل «25» أو «أحمد» في مكانها.
+        const lastAssistantMessage = [...session.messages]
+          .reverse()
+          .find((m) => m.dir === 'out')?.body ?? '';
+        const extracted = autoExtractFacts(batch.map((b) => b.body), session.profile, lastAssistantMessage);
         if (Object.keys(extracted).length > 0) {
           store.patchProfile(key, extracted);
           log.info(`🧠 [${key}] استخراج تلقائي وحفظ في الذاكرة الدائمة: ${JSON.stringify(extracted)}`);
@@ -253,9 +261,13 @@ export class AgentOrchestrator {
           toolsEnabled: config.bot.TOOLS_ENABLED,
           profile: session.profile,
           launch: session.launch,
+          lastAssistantMessage,
         });
 
         const extraBits: string[] = [];
+        if (lastAssistantMessage) {
+          extraBits.push(`[حارس متابعة: آخر رد للبوت محفوظ في السياق. لا تكرر نصه ولا تعيد سؤاله؛ اعتبر رسالة العميل الحالية جوابًا له إن كانت مناسبة، وانتقل للسؤال التالي فقط إذا بقيت معلومة ناقصة.]`);
+        }
         if (batch.length > 1) {
           extraBits.push(`[ملاحظة نظام: العميل أرسل ${batch.length} رسائل متتابعة قبل أن ترد. أجب عليها جميعًا في رد واحد متماسك ولا تكرر نفسك.]`);
         }
@@ -322,6 +334,15 @@ export class AgentOrchestrator {
             this.emit({ t: 'error', sessionKey: key, message: `فشل إرسال واتساب: ${sent.error ?? '؟'} — تحقق من WHATSAPP_ACCESS_TOKEN` });
           }
           return;
+        }
+
+        // حارس نهائي مستقل عن النموذج: حتى لو تجاهل التعليمات، لا نرسل سؤالًا
+        // سبق أن أجاب عنه العميل وكانت إجابته مثبتة في الذاكرة.
+        const guardedParts = removeRepeatedMemoryQuestions(result.parts, session.profile);
+        if (guardedParts.length !== result.parts.length) result.quickReplies = [];
+        result.parts = guardedParts;
+        if (result.parts.length === 0 && !result.handoff) {
+          result.parts = ['تمام، حفظت التفاصيل عندي ✅ خلّينا نكمل من آخر نقطة وصلنا لها.'];
         }
 
         const latency = Date.now() - started;
@@ -679,50 +700,111 @@ export class AgentOrchestrator {
 
 type CommandName = 'bot' | 'human' | 'pause' | 'resume' | 'reset' | 'help';
 
-/** استخراج ذكي وتلقائي لبيانات المطعم من رسائل العميل وحفظها في الذاكرة الدائمة */
-function autoExtractFacts(texts: string[], existingProfile?: RestaurantProfile): Partial<RestaurantProfile> {
-  const combined = texts.join('\n');
+/** أسماء القنوات العامة لا تصلح كاسم عميل في ملف التفعيل. */
+function usableContactName(name: string, key: string): boolean {
+  const value = (name ?? '').trim();
+  if (value.length < 2 || value.length > 80 || value === key) return false;
+  return !/^(?:عميل|زبون|مجرّب|مستخدم|user|customer|test|unknown|غير معروف)(?:\s|$)/iu.test(value);
+}
+
+/**
+ * يمنع آخر طبقة حراسة تكرار الأسئلة المعروفة من التسرب للعميل.
+ * النموذج يحصل على تعليمات الذاكرة، لكن هذا الفحص الحتمي يحمي التجربة أيضًا
+ * عند تجاهل النموذج للسياق أو بعد استئناف جلسة قديمة.
+ */
+export function removeRepeatedMemoryQuestions(parts: string[], profile?: RestaurantProfile): string[] {
+  const blocked: RegExp[] = [];
+  if (profile?.tables) blocked.push(/(?:كم|ما هو عدد|ما عدد)\s+(?:عدد\s+)?(?:ال)?طاول(?:ة|ات|ه|ا)?\s*(?:عندك|لديك)?/iu);
+  if (profile?.restaurant_name) blocked.push(/(?:شو|ما|ما هو)\s+(?:اسم)\s+(?:ال)?مطعم(?:ك|كم)?/iu);
+  if (profile?.city) blocked.push(/(?:بأي|في أي|ما هي)\s+مدينة\s+(?:ال)?مطعم(?:ك|كم)?/iu);
+  if (profile?.preferred_plan) blocked.push(/(?:أي|ما هي)\s+الباق(?:ة|ه)\s+(?:تريد|تفضّل|تختار|نثبت)/iu);
+  if (blocked.length === 0) return parts;
+
+  return parts
+    .map((part) => part
+      .split('\n')
+      .filter((line) => !blocked.some((pattern) => pattern.test(line) && /[؟?]/.test(line)))
+      .join('\n')
+      .replace(/\s{2,}/g, ' ')
+      .trim())
+    .filter(Boolean);
+}
+
+/**
+ * استخراج ذكي وتلقائي لبيانات المطعم من رسائل العميل وحفظها في الذاكرة الدائمة.
+ *
+ * مهم: لا نعتمد على النموذج وحده في الذاكرة. كثير من العملاء يجيبون عن سؤال
+ * البوت برسالة قصيرة جدًا مثل «أحمد» أو «25»، لذلك نقرأ آخر سؤال أيضًا ونربط
+ * الجواب بمكانه الصحيح قبل إرسال السياق للنموذج.
+ */
+export function autoExtractFacts(
+  texts: string[],
+  existingProfile?: RestaurantProfile,
+  lastAssistantMessage = '',
+): Partial<RestaurantProfile> {
+  const combined = texts.join('\n').trim();
+  const last = lastAssistantMessage.toLowerCase();
   const patch: Partial<RestaurantProfile> = {};
+  const isShortAnswer = combined.length > 0 && combined.length <= 80 && !/[،,؛;\n]/.test(combined);
 
-  // 1. عدد الطاولات (مثل: "35 طاولة", "35", "عندي 25 طاولة", "35 طاوله")
-  const tableMatch = combined.match(/(?:^|\s|[^\d])(\d{1,3})\s*(?:طاولة|طاولات|طاوله|طاو|table|tables)\b/i)
-    || (texts.length === 1 && /^\s*(\d{1,3})\s*$/.test(combined) && !existingProfile?.tables ? combined.match(/^\s*(\d{1,3})\s*$/) : null);
-  if (tableMatch) {
-    const num = parseInt(tableMatch[1], 10);
-    if (num > 0 && num <= 2000) {
-      patch.tables = num;
+  const numberAfter = (pattern: RegExp): number | undefined => {
+    const match = combined.match(pattern);
+    const value = match?.[1] ? Number(match[1]) : NaN;
+    return Number.isInteger(value) && value > 0 && value <= 2000 ? value : undefined;
+  };
+
+  // 1. عدد الطاولات — يشمل الإجابة القصيرة «25» إذا كان آخر سؤال عن الطاولات.
+  const tableCount =
+    numberAfter(/(?:^|\s|[^\d])(\d{1,3})\s*(?:طاولة|طاولات|طاوله|طاو|table|tables)(?![\p{L}])/iu) ??
+    (/(?:كم|عدد|how many).*?(?:طاول|table)|(?:طاول|table).*?[؟?]/iu.test(last)
+      ? numberAfter(/^(?:\s*)(\d{1,3})(?:\s*)$/)
+      : undefined);
+  if (tableCount) patch.tables = tableCount;
+
+  // 2. اسم المطعم — أوقف الالتقاط عند الفاصلة أو السؤال حتى لا نأخذ بقية الجملة.
+  const restaurantMatch = combined.match(
+    /(?:اسم المطعم|المطعم اسمه|مطعمي اسمه|مطعمنا اسمه|اسم الكافيه|الكافيه اسمه)\s*[:=]?\s*([^،,\n.!؟?]+?)(?=\s+(?:في|بمدينة|عندي|وعندي)(?:\s|$)|[،,\n.!؟?]|$)/iu,
+  );
+  if (restaurantMatch) {
+    const value = restaurantMatch[1].trim();
+    if (value && !/^(ايش|إيش|شو|كم|بكم|في|على|هو|جديد|صغير|كبير)\b/i.test(value)) {
+      patch.restaurant_name = value;
     }
+  } else if (isShortAnswer && /اسم المطعم|اسم الكافيه|واسم المطعم/.test(last)) {
+    patch.restaurant_name = combined.replace(/[.!؟?]+$/, '').trim();
   }
 
-  // 2. اسم المطعم
-  const restMatch = combined.match(/(?:اسم المطعم|المطعم اسمه|اسمه|مطعمنا|كافيه|مقهى|مطعم)\s*[:=]?\s*([A-Za-z\u0621-\u064A0-9\s'-]{2,50})/i);
-  if (restMatch && !existingProfile?.restaurant_name) {
-    const rName = restMatch[1].trim();
-    if (!/^(ايش|شو|كم|بكم|في|على|هو|جديد|صغير|كبير)/.test(rName)) {
-      patch.restaurant_name = rName;
-    }
+  // 3. المدينة — نقرأ صيغة صريحة أو جوابًا قصيرًا بعد سؤال المدينة.
+  const cityMatch = combined.match(/(?:بمدينة|في مدينة|مدينة|في|بـ)\s+([^،,\n.!؟?]{2,40})/iu);
+  if (cityMatch) {
+    const value = cityMatch[1].trim();
+    if (!/^(مطعم|المطعم|كافيه|مقهى|عندي)\b/i.test(value)) patch.city = value;
+  } else if (isShortAnswer && /بأي مدينة|أي مدينة|مدينة المطعم/.test(last)) {
+    patch.city = combined.replace(/[.!؟?]+$/, '').trim();
   }
 
-  // 3. المدينة
-  const cityMatch = combined.match(/(?:بمدينة|في مدينة|مدينة|في|بـ)\s+([A-Za-z\u0621-\u064A\s]{3,30})/i)
-    || combined.match(/\b(غزة|القدس|رام الله|نابلس|الخليل|جنين|طولكرم|قلقيلية|أريحا|بيت لحم|خانيونس|رفح|حيفا|يافا|عكا|الناصرة|تل أبيب|عمان|الرياض|جدة|دبي|القاهرة|Gaza|Ramallah|Jerusalem)\b/i);
-  if (cityMatch && !existingProfile?.city) {
-    patch.city = cityMatch[1].trim();
+  // 4. عدد الفروع — حفظه يمنع العودة للسؤال نفسه عند الحديث عن المؤسسات.
+  const branches = numberAfter(/(?:عندي|لدينا|عندنا)?\s*(\d{1,3})\s*(?:فرع|فروع|branch|branches)(?![\p{L}])/iu);
+  if (branches) patch.branches = branches;
+
+  // 5. الباقة المختارة. لا نبدّل اختيارًا محفوظًا لمجرد ذكر باقة أثناء المقارنة،
+  // إلا إذا كان العميل يجيب عن سؤال التثبيت أو اختارها بصيغة واضحة.
+  const explicitPlan = /(?:أختار|اختار|نثبت|ثبت|باقة|على)\s*(?:الـ)?(أساسية|اساسية|starter|احترافية|احتراف|pro|مؤسسات|سلاسل|enterprise)/iu.exec(combined)?.[1]?.toLowerCase();
+  const askedForPlan = /نثبت|أي باقة|الباقة|الاحترافية|الأساسية|المؤسسات/.test(last);
+  const planText = explicitPlan || (askedForPlan ? combined : '');
+  if (!existingProfile?.preferred_plan || explicitPlan || askedForPlan) {
+    if (/أساسية|اساسية|starter/i.test(planText)) patch.preferred_plan = 'starter';
+    else if (/احترافية|احتراف|pro\b/i.test(planText)) patch.preferred_plan = 'pro';
+    else if (/مؤسسات|سلاسل|enterprise/i.test(planText)) patch.preferred_plan = 'enterprise';
   }
 
-  // 4. الباقة المفضلة
-  if (/أساسية|اساسية|starter/i.test(combined)) {
-    patch.preferred_plan = 'starter';
-  } else if (/احترافية|احتراف|pro\b/i.test(combined)) {
-    patch.preferred_plan = 'pro';
-  } else if (/مؤسسات|سلاسل|enterprise/i.test(combined)) {
-    patch.preferred_plan = 'enterprise';
-  }
-
-  // 5. اسم العميل
-  const nameMatch = combined.match(/(?:اسمي|معك|أنا)\s+([A-Za-z\u0621-\u064A\s]{3,40})/i);
-  if (nameMatch && !existingProfile?.full_name) {
-    patch.full_name = nameMatch[1].trim();
+  // 6. اسم العميل — لا نلتقط «أنا عندي...» كاسم بالخطأ.
+  const nameMatch = combined.match(/(?:اسمي|أنا اسمي|انا اسمي|معك)\s+([^،,\n.!؟?]{2,40})/iu);
+  if (nameMatch) {
+    const value = nameMatch[1].trim();
+    if (!/^(عندي|لدينا|أريد|ابغى|بدي|من|في)\b/i.test(value)) patch.full_name = value;
+  } else if (isShortAnswer && /شو اسمك|ما اسمك|اسمك|الاسم/.test(last)) {
+    patch.full_name = combined.replace(/[.!؟?]+$/, '').trim();
   }
 
   return patch;
