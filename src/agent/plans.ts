@@ -77,6 +77,23 @@ export function getPlan(id: PlanId): MureehPlan {
   return MUREEH_PLANS.find((p) => p.id === id) ?? MUREEH_PLANS[0]!;
 }
 
+/**
+ * تكلفة الطاولة الواحدة شهريًا — أقوى جملة إقناع سعرية.
+ * مثال: الاحترافية (299₪) ÷ 25 طاولة ≈ 12₪ للطاولة — «أقل من سعر وجبة».
+ */
+export function perTableMonthly(plan: MureehPlan, tables: number): number {
+  if (!tables || tables <= 0) return plan.priceMonthly;
+  return Math.max(1, Math.round(plan.priceMonthly / tables));
+}
+
+/** سطر القيمة المقسّطة الجاهز للردود (يُستخدم في التوصيات والإقناع) */
+export function valueLine(plan: MureehPlan, tables?: number): string {
+  if (tables && tables > 0) {
+    return `*${plan.priceMonthly} ₪/شهر* فقط — يعني ~*${perTableMonthly(plan, tables)} ₪* للطاولة الواحدة`;
+  }
+  return `*${plan.priceMonthly} ₪/شهر* فقط`;
+}
+
 export interface RecommendInput {
   /** عدد الطاولات في المطعم */
   tables?: number;

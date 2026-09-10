@@ -50,15 +50,19 @@ export const config = {
     API_KEYS: list('GEMINI_API_KEY', []),
     BASE_URL: str('GEMINI_BASE_URL', ''),
     /** عنوان بديل للـ API (مفيد للاختبار مع خادم محاكٍ أو وسيط/Proxy) */
-    MODEL: (() => {
-      const m = str('GEMINI_MODEL', 'gemini-3.5-flash-lite');
-      return (m === 'gemini-2.5-flash' || m === 'gemini-2.5-flash') ? 'gemini-3.5-flash-lite' : m;
-    })(),
-    /** نموذج أرخص/أسرع لمهام التلخيص */
-    FAST_MODEL: (() => {
-      const m = str('GEMINI_FAST_MODEL', 'gemini-3.5-flash-lite');
-      return (m === 'gemini-2.5-flash-lite' || m === 'gemini-2.5-flash-lite') ? 'gemini-3.5-flash-lite' : m;
-    })(),
+    /** الموديل الرئيسي — يُستخدم كما هو تمامًا بدون أي تعديل من الكود */
+    MODEL: str('GEMINI_MODEL', 'gemini-2.5-flash'),
+    /** نموذج أرخص/أسرع لمهام التلخيص — وأول بديل تلقائي عند تعذّر الرئيسي */
+    FAST_MODEL: str('GEMINI_FAST_MODEL', 'gemini-2.5-flash-lite'),
+    /**
+     * بدائل تلقائية تُجرَّب بالترتيب عند تعذّر الموديل الرئيسي (404/حصة منتهية).
+     * هذا يحمي البوت من توقف الموديلات القديمة — العميل لا يرى أي خلل أبدًا.
+     */
+    MODEL_FALLBACKS: list('GEMINI_MODEL_FALLBACKS', [
+      'gemini-3.5-flash-lite',
+      'gemini-3.1-flash-lite',
+      'gemini-3-flash-preview',
+    ]),
     TEMPERATURE: num('GEMINI_TEMPERATURE', 0.8),
     MAX_OUTPUT_TOKENS: num('GEMINI_MAX_OUTPUT_TOKENS', 1024),
     /**
@@ -148,6 +152,16 @@ export function validateConfig(): { ok: boolean; warnings: string[]; errors: str
   if (!config.gemini.API_KEY) {
     const msg = 'GEMINI_API_KEY غير مضبوط — سيتم استخدام محرك ردود وهمي (Mock) للتجربة فقط.';
     demo ? warnings.push(msg) : errors.push(msg);
+  }
+
+  // موديلات أُطفئت من Google نهائيًا — أي طلب لها يردّ 404 (خلل دائم لو لم تُغيَّر)
+  if (/gemini-(1\.0|1\.5|2\.0)/i.test(config.gemini.MODEL)) {
+    warnings.push(
+      `⚠️ الموديل ${config.gemini.MODEL} متوقف من Google (يرجع 404) — غيّر GEMINI_MODEL إلى gemini-2.5-flash أو gemini-3.5-flash-lite. سيحاول البوت البدائل تلقائيًا.`,
+    );
+  }
+  if (config.gemini.API_KEYS.length > 1) {
+    warnings.push(`ℹ️ تم رصد ${config.gemini.API_KEYS.length} مفاتيح Gemini — سيتم التحويل التلقائي بينها عند انتهاء الحصة.`);
   }
 
   if (!config.whatsapp.ENABLED) {
