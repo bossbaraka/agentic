@@ -57,6 +57,34 @@ export interface StoredMessage {
   meta?: Record<string, unknown>;
 }
 
+/** بيانات المطعم — تُجمع تدريجيًا لتجهيز نسخة الإطلاق */
+export interface RestaurantProfile {
+  full_name?: string;
+  restaurant_name?: string;
+  city?: string;
+  /** عدد الفروع (الافتراضي 1) */
+  branches?: number;
+  tables?: number;
+  preferred_plan?: 'starter' | 'pro' | 'enterprise';
+  /** عدد الأصناف التقريبي في المنيو */
+  menu_items?: number;
+  /** هل الشعار/الهوية جاهزان؟ */
+  has_logo?: boolean;
+  whatsapp_number?: string;
+  notes?: string;
+  updatedAt?: number;
+}
+
+/** حالة طلب الإطلاق */
+export interface LaunchState {
+  status: 'collecting' | 'awaiting_confirmation' | 'confirmed';
+  /** نص التصور المعروض على العميل */
+  blueprint?: string;
+  orderRef?: string;
+  confirmedAt?: number;
+  updatedAt?: number;
+}
+
 /** جلسة/محادثة مع عميل واحد */
 export interface Session {
   /** رقم العميل (wa_id) */
@@ -67,6 +95,10 @@ export interface Session {
   language: string;
   /** ملخص تراكمي للمحادثة (يُبنى عند تجاوز السجل) */
   summary: string;
+  /** ملف التجهيز للإطلاق (إن بدأ مسار الاشتراك) */
+  profile?: RestaurantProfile;
+  /** حالة طلب الإطلاق: تصور معروض / مؤكد عند مدير المنصة */
+  launch?: LaunchState;
   /** اسم الموظف/العميل كما يعرفه البوت */
   knownName?: string;
   createdAt: number;

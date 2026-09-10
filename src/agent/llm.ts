@@ -3,9 +3,12 @@ import { config } from '../config.js';
 import { extractJson, log, retry, sanitizeForJson, sleep, splitText } from '../lib/utils.js';
 import type { MediaPart } from '../types.js';
 import { TOOL_DECLARATIONS, runTool, type ToolContext, type ToolResult } from './tools.js';
-import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan } from './plans.js';
+import { store } from '../lib/store.js';
+import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
+import { buildBlueprintText, managerOrderMessage, planIdFromText } from './onboarding.js';
 import {
   clampButtons,
+  coherentQuickReplies,
   dayPart,
   fallbackQuickReplies,
   firstNameOf,
@@ -61,6 +64,8 @@ export interface AgentOutput {
    */
   degraded?: boolean;
   degradedReason?: string;
+  /** مرجع طلب الإطلاق عند تأكيده (ORD-XXXXXX) — يعني: حُوّل لمدير المنصة */
+  orderRef?: string;
 }
 
 // ─────────────────────────── بناء Contents ───────────────────────────
@@ -304,9 +309,9 @@ function finishOutput(partial: Omit<AgentOutput, 'quickReplies'> & { quickReplie
           clean.slice(config.bot.MAX_REPLY_PARTS - 1).join('\n'),
         ]
       : clean;
-  const qr = partial.quickReplies?.length
-    ? clampButtons(partial.quickReplies)
-    : fallbackQuickReplies(partial.intent);
+  // الأزرار تُبنى من الجملة الأخيرة حصرًا — لا أزرار نشاز عن النص أبدًا
+  const lastText = capped[capped.length - 1] ?? '';
+  const qr = coherentQuickReplies(lastText, partial.quickReplies, partial.intent, partial.handoff);
   return { ...partial, parts: capped, quickReplies: qr };
 }
 
@@ -673,11 +678,20 @@ async function generateReplyInner(input: AgentInput, started: number): Promise<A
   }
 
   const supportTicket = toolsCalled.some((t) => t.name === 'create_support_ticket');
+  const confirmedOrder = toolsCalled.find((t) => t.name === 'confirm_launch_order');
+  const orderRef =
+    confirmedOrder && (confirmedOrder.result as any)?.order_ref
+      ? String((confirmedOrder.result as any).order_ref)
+      : undefined;
 
   return finishOutput({
     parts: outParts,
-    handoff: parsed.handoff || supportTicket,
-    reason: parsed.reason ?? (supportTicket ? 'تذكرة دعم فُتحت — متابعة بشرية' : undefined),
+    handoff: parsed.handoff || supportTicket || Boolean(orderRef),
+    reason:
+      parsed.reason ??
+      (orderRef ? `طلب إطلاق مؤكد ${orderRef} — حُوّل لمدير المنصة` : undefined) ??
+      (supportTicket ? 'تذكرة دعم فُتحت — متابعة بشرية' : undefined),
+    orderRef,
     intent: parsed.intent,
     sentiment: parsed.sentiment,
     quickReplies: parsed.quickReplies,
@@ -736,6 +750,61 @@ function nameFromPrompt(systemPrompt: string): string {
 }
 
 /**
+ * استرجاع تفاصيل التجهيز من سجل المحادثة (نسخة التجربة):
+ * يمرّ على أزواج (سؤال البوت ← جواب العميل) ويملأ الخانات.
+ */
+function parseActivationSlots(turns: Turn[]): {
+  name?: string;
+  restaurant?: string;
+  city?: string;
+  tables?: number;
+  plan?: PlanId;
+} {
+  const slots: { name?: string; restaurant?: string; city?: string; tables?: number; plan?: PlanId } = {};
+  for (let i = 0; i < turns.length; i++) {
+    const t = turns[i]!;
+    if (t.role !== 'model') continue;
+    const next = turns[i + 1];
+    const u = next && next.role === 'user' ? next.text.trim().split('\n')[0]!.trim() : '';
+    if (/شو اسمك/.test(t.text)) {
+      if (u && u.split(/\s+/).length <= 4) slots.name = u.slice(0, 40);
+    } else if (/واسم المطعم/.test(t.text)) {
+      if (u) slots.restaurant = u.slice(0, 60);
+    } else if (/بأي مدينة/.test(t.text)) {
+      if (u) slots.city = u.slice(0, 40);
+    } else if (/كم طاولة تشتغل عندك\؟/.test(t.text)) {
+      const m = u.match(/(\d{1,3})/);
+      if (m) slots.tables = Number(m[1]);
+    } else if (/نثبت على/.test(t.text)) {
+      const p = planIdFromText(t.text);
+      if (p) slots.plan = p;
+      const chosen = u ? planIdFromText(u) : null;
+      if (chosen) slots.plan = chosen;
+    }
+  }
+  return slots;
+}
+
+/** خانات التجهيز المحفوظة في ملف الجلسة — التعديلات المؤكدة تتقدم على قراءة السجل */
+function savedSlots(sessionKey: string): { name?: string; restaurant?: string; city?: string; tables?: number; plan?: PlanId } {
+  const p = store.get(sessionKey).profile;
+  if (!p) return {};
+  const out: { name?: string; restaurant?: string; city?: string; tables?: number; plan?: PlanId } = {};
+  if (p.full_name) out.name = p.full_name;
+  if (p.restaurant_name) out.restaurant = p.restaurant_name;
+  if (p.city) out.city = p.city;
+  if (p.tables && p.tables > 0) out.tables = p.tables;
+  const plan = planIdFromText(String(p.preferred_plan ?? ''));
+  if (plan) out.plan = plan;
+  return out;
+}
+
+/** سجل المحادثة + ملف الجلسة معًا — المحفوظ يتقدم */
+function collectSlots(turns: Turn[], sessionKey: string): { name?: string; restaurant?: string; city?: string; tables?: number; plan?: PlanId } {
+  return { ...parseActivationSlots(turns), ...savedSlots(sessionKey) };
+}
+
+/**
  * يعمل بدون GEMINI_API_KEY حتى تقدر تجرب المسار الكامل.
  * الردود قواعد بسيطة — لكن بنفس نبرة الإنسان المتحمّس، لا سكربت جاف.
  */
@@ -749,6 +818,18 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
   const vocative = name ? `${name}، ` : '';
   const askedActivation = /أجهّز لك التفعيل|أجهز لك التفعيل|أجهز التفعيل|تبيني أجه|خلّينا نجه|شو اسمك|أرسل لي: اسمك/.test(lastModelText);
   const askedName = /شو اسمك|ما اسمك|اسمك\؟/.test(lastModelText);
+  // خطوات التجهيز للإطلاق (نسخة التجربة): مطعم ← مدينة ← طاولات ← باقة ← تصور ← تأكيد
+  const askedRestaurant = /واسم المطعم/.test(lastModelText);
+  const askedCity = /بأي مدينة/.test(lastModelText);
+  const askedTables = /كم طاولة تشتغل عندك\؟/.test(lastModelText);
+  const askedPlanConfirm = /نثبت على/.test(lastModelText);
+  const askedConfirm = /(أكّد|تأكيد) الطلب/.test(lastModelText);
+  const askedEdit = /وش تبي تعدّل/.test(lastModelText);
+  // النية الحقيقية تتغلب على التحية: «هلا، بكم الباقات؟» = سؤال أسعار لا تحية
+  const hasRealIntent = /سعر|أسعار|اسعار|بكم|تكلف|باقة|باقات|طاول|اشترك|تفعيل|أبدأ|ابدأ|نبدأ|يلا|مشكلة|تقني|غالي|بفكر|افكر|أفكر|فروع|سلسلة|مطبخ|kds|pos|موظف|بشري|شكرا|شكرًا|تأكيد|أكّد|طلب|qr:/.test(text);
+  let mockButtons: QuickReply[] | undefined;
+  let mockOrderRef: string | undefined;
+  let mockSideEffects: AgentOutput['sideEffects'] = [];
 
   const parts: string[] = [];
   let handoff = false;
@@ -785,10 +866,10 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     intent = 'عام';
     parts.push('أنا مساعد الفريق هنا على الدردشة، والزملاء البشريين معي لو احتجتهم 🙂');
     parts.push('تحب نمرّ على الباقات ولا أجهّز لك تفعيل؟');
-  } else if (/كيفك|كيف حالك|شخبارك|عامل ايه|whats up/.test(text)) {
+  } else if (!hasRealIntent && /كيفك|كيف حالك|شخبارك|عامل ايه|whats up/.test(text)) {
     intent = 'تحية';
     parts.push(`${vocative}تمام والحمد لله، وأنت؟ 🙌 خلينا نفيد مطعمك: كم طاولة تشتغل عندك؟`);
-  } else if ((/سلام|مرحبا|هلا|اهلا|أهلًا|hi\b|hello|hey|صباح|مساء/.test(text) && text.length < 80) || click && /هلا|hi/.test(text)) {
+  } else if (!hasRealIntent && ((/سلام|مرحبا|هلا|اهلا|أهلًا|hi\b|hello|hey|صباح|مساء/.test(text) && text.length < 80) || click && /هلا|hi/.test(text))) {
     intent = 'تحية';
     const g = greetingWord(dayPart());
     parts.push(`${g}${name ? ` ${name}` : ''} 👋 أنا ${config.bot.BOT_NAME} — منيو QR، شاشة مطبخ حية، وكاشير من الرمز على الطاولة.`);
@@ -806,7 +887,8 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     }
   } else {
     const m = text.match(/(\d{1,3})\s*(?:طاولة|طاولات|طاو|table)/);
-    if (m) {
+    // لو سألنا عن الطاولات ضمن التجهيز، الجواب يُكمل المسار ولا يبدأ توصية جديدة
+    if (m && !askedTables) {
       intent = 'توصية_باقة';
       const tables = Number(m[1]);
       const rec = recommendPlan({ tables });
@@ -832,7 +914,7 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     }
   }
 
-  if (parts.length === 0 && (/فروع|سلسلة|سلاسل|enterprise|chain|المؤسسات 799|qr:enterprise/.test(text))) {
+  if (parts.length === 0 && !askedPlanConfirm && (/فروع|سلسلة|سلاسل|enterprise|chain|المؤسسات 799|qr:enterprise/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('enterprise');
     parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* (≈ ${p.priceYearlyPerMonth} ₪ عند السنوي):`);
@@ -840,7 +922,7 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     parts.push('كم فرعًا عندك حاليًا؟');
   }
 
-  if (parts.length === 0 && (/احتراف|pro|kds|مطبخ|pos|الاحترافية 299|qr:pro/.test(text))) {
+  if (parts.length === 0 && !askedPlanConfirm && (/احتراف|pro|kds|مطبخ|pos|الاحترافية 299|qr:pro/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('pro');
     parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* ← الأكثر طلبًا.`);
@@ -848,7 +930,7 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     parts.push('تبيني أجهّز لك التفعيل؟');
   }
 
-  if (parts.length === 0 && (/أساسية|starter|الأساسية 149|qr:starter/.test(text))) {
+  if (parts.length === 0 && !askedPlanConfirm && (/أساسية|starter|الأساسية 149|qr:starter/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('starter');
     parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر*. بداية نظيفة لمنيو QR وكاشير واستدعاء نادل.`);
@@ -866,7 +948,172 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     parts.push('يا سلام، خلّينا نجهّزها 🔥 شو اسمك؟');
   }
 
-  if (parts.length === 0 && /شكرا|شكرًا|تمام|ممتاز|رائع|thanks|great|awesome/.test(text)) {
+  // ── التجهيز للإطلاق: مطعم ← مدينة ← طاولات ← باقة ← تصور ← تأكيد ← مدير المنصة
+  if (parts.length === 0 && askedRestaurant && raw.trim()) {
+    intent = 'تجهيز_إطلاق';
+    parts.push(`تمام، *${raw.trim().split('\n')[0]!.slice(0, 40)}* — اسم حلو 👍 بأي مدينة المطعم؟`);
+  }
+
+  if (parts.length === 0 && askedCity && raw.trim()) {
+    intent = 'تجهيز_إطلاق';
+    parts.push('ممتاز. كم طاولة تشتغل عندك؟');
+  }
+
+  if (parts.length === 0 && askedTables) {
+    const tm = text.match(/(\d{1,3})/);
+    if (tm) {
+      intent = 'تجهيز_إطلاق';
+      const tCount = Number(tm[1]);
+      const rec = recommendPlan({ tables: tCount });
+      const p = rec.plan;
+      parts.push(`لـ*${tCount} طاولة* أنسب شيء *${p.name}* — *${p.priceMonthly} ₪/شهر* (~*${perTableMonthly(p, tCount)} ₪* للطاولة).`);
+      parts.push(`نثبت على *${p.name}*؟`);
+      mockButtons = [
+        { id: 'qr:plan-yes', title: 'نعم ثبتها' },
+        { id: 'qr:edit', title: 'غيّر الباقة' },
+      ];
+    } else {
+      intent = 'تجهيز_إطلاق';
+      parts.push('اكتب لي عدد الطاولات رقمًا — مثلًا: 25');
+    }
+  }
+
+  if (parts.length === 0 && askedPlanConfirm) {
+    const chosen = planIdFromText(raw);
+    if (chosen || isAffirmative(raw) || /نثبت|ثبت|تمام|أكيد/.test(text)) {
+      intent = 'تأكيد_طلب';
+      const slots = collectSlots(input.turns, input.toolContext.sessionKey);
+      const plan: PlanId = chosen ?? slots.plan ?? planIdFromText(lastModelText) ?? 'pro';
+      const profile = {
+        full_name: slots.name || name || undefined,
+        restaurant_name: slots.restaurant,
+        city: slots.city,
+        branches: 1,
+        tables: slots.tables,
+        preferred_plan: plan,
+      };
+      // حفظ الملف والتصور في الجلسة (يظهران في لوحة التحكم)
+      store.patchProfile(input.toolContext.sessionKey, profile);
+      store.patchLaunch(input.toolContext.sessionKey, {
+        status: 'awaiting_confirmation',
+        blueprint: buildBlueprintText(profile),
+      });
+      parts.push(buildBlueprintText(profile));
+      parts.push('هذا تصور نسختك كاملًا 👆 لو كل شيء تمام اضغط *تأكيد الطلب* — وأي تعديل اكتبه لي.');
+      mockButtons = [
+        { id: 'qr:confirm', title: 'تأكيد الطلب' },
+        { id: 'qr:edit', title: 'تعديل' },
+      ];
+    } else {
+      intent = 'استفسار_أسعار';
+      parts.push(`ولا يهمك 👍 ثلاث باقات:\n${planList()}\n\nأي وحدة نثبت عليها؟ اكتب اسمها.`);
+    }
+  }
+
+  if (parts.length === 0 && askedConfirm) {
+    const wantsEdit =
+      /تعديل|عدّل|عدل|تبديل|غيّر|غير|لا |لا$|لسه|اصبر|شوي/.test(text) &&
+      !/أكّد|تأكيد|نعم|تمام|موافق|أكيد/.test(text);
+    if (wantsEdit) {
+      intent = 'تجهيز_إطلاق';
+      const num = text.match(/(\d{1,3})/);
+      const tablesEdit = num && /طاول/.test(text) ? Number(num[1]) : undefined;
+      if (tablesEdit) {
+        // التعديل وصل كاملًا في نفس الرسالة — نطبّقه ونعيد التأكيد فورًا
+        const slots = collectSlots(input.turns, input.toolContext.sessionKey);
+        const plan: PlanId = slots.plan ?? planIdFromText(lastModelText) ?? 'pro';
+        const profile = {
+          full_name: slots.name || name || undefined,
+          restaurant_name: slots.restaurant,
+          city: slots.city,
+          branches: 1,
+          tables: tablesEdit,
+          preferred_plan: plan,
+        };
+        store.patchProfile(input.toolContext.sessionKey, profile);
+        store.patchLaunch(input.toolContext.sessionKey, {
+          status: 'awaiting_confirmation',
+          blueprint: buildBlueprintText(profile),
+        });
+        const p = getPlan(plan);
+        parts.push(`ظبطتها ✅ صارت *${tablesEdit} طاولة* — يعني ~*${perTableMonthly(p, tablesEdit)} ₪* للطاولة على *${p.name}*. أكّد الطلب؟`);
+        mockButtons = [
+          { id: 'qr:confirm', title: 'تأكيد الطلب' },
+          { id: 'qr:edit', title: 'تعديل' },
+        ];
+      } else {
+        parts.push('تمام، وش تبي تعدّل؟ اكتبه لي بجملة وحدة وأنا أظبطه.');
+      }
+    } else {
+      intent = 'تأكيد_طلب';
+      handoff = true;
+      mockOrderRef = `ORD-${Date.now().toString(36).toUpperCase().slice(-6)}`;
+      const slots = collectSlots(input.turns, input.toolContext.sessionKey);
+      const plan: PlanId = slots.plan ?? planIdFromText(lastModelText) ?? 'pro';
+      const profile = {
+        full_name: slots.name || name || undefined,
+        restaurant_name: slots.restaurant,
+        city: slots.city,
+        branches: 1,
+        tables: slots.tables,
+        preferred_plan: plan,
+        whatsapp_number: input.toolContext.sessionKey.startsWith('tg:') ? undefined : input.toolContext.sessionKey,
+      };
+      mockSideEffects = [{
+        kind: 'notify_manager',
+        payload: {
+          note: managerOrderMessage(profile, mockOrderRef, input.toolContext.sessionKey),
+          orderRef: mockOrderRef,
+        },
+        tool: 'mock_confirm',
+      }];
+      // حفظ الطلب المؤكد في الجلسة (يظهر في لوحة التحكم)
+      store.patchProfile(input.toolContext.sessionKey, profile);
+      store.patchLaunch(input.toolContext.sessionKey, {
+        status: 'confirmed',
+        blueprint: buildBlueprintText(profile),
+        orderRef: mockOrderRef,
+        confirmedAt: Date.now(),
+      });
+      parts.push(`تم تأكيد طلبك ✅ رقم الطلب: *${mockOrderRef}*`);
+      parts.push('ملفك الكامل وصل *مدير المنصة* — يتواصل معك ويجهز نسختك، خلال دقائق عادة وبدون بطاقة للبدء 🚀');
+    }
+  }
+
+  if (parts.length === 0 && askedEdit && raw.trim()) {
+    intent = 'تأكيد_طلب';
+    const num = text.match(/(\d{1,3})/);
+    const tablesEdit = num && /طاول/.test(text) ? Number(num[1]) : undefined;
+    if (tablesEdit) {
+      const slots = collectSlots(input.turns, input.toolContext.sessionKey);
+      const plan: PlanId = slots.plan ?? planIdFromText(lastModelText) ?? 'pro';
+      const profile = {
+        full_name: slots.name || name || undefined,
+        restaurant_name: slots.restaurant,
+        city: slots.city,
+        branches: 1,
+        tables: tablesEdit,
+        preferred_plan: plan,
+      };
+      store.patchProfile(input.toolContext.sessionKey, profile);
+      store.patchLaunch(input.toolContext.sessionKey, {
+        status: 'awaiting_confirmation',
+        blueprint: buildBlueprintText(profile),
+      });
+      const p = getPlan(plan);
+      parts.push(`ظبطتها ✅ صارت *${tablesEdit} طاولة* — يعني ~*${perTableMonthly(p, tablesEdit)} ₪* للطاولة على *${p.name}*. أكّد الطلب؟`);
+    } else {
+      parts.push(`وصل التعديل ✅ (${raw.trim().split('\n')[0]!.slice(0, 80)}) — سجّلته مع طلبك.`);
+      parts.push('أكّد الطلب؟');
+    }
+    mockButtons = [
+      { id: 'qr:confirm', title: 'تأكيد الطلب' },
+      { id: 'qr:edit', title: 'تعديل' },
+    ];
+  }
+
+  // «تمام» أثناء التأكيد = موافقة لا شكر — لا نكسر المسار برد الشكر
+  if (parts.length === 0 && !askedConfirm && !askedPlanConfirm && /شكرا|شكرًا|تمام|ممتاز|رائع|thanks|great|awesome/.test(text)) {
     intent = 'إيجابي';
     parts.push(`العفو${name ? ' ' + name : ''} 🙌 أي سؤال ثاني عن الباقات أو التفعيل، أنا هنا.`);
   }
@@ -897,6 +1144,7 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
   }
 
   const reason =
+    intent === 'تأكيد_طلب' && mockOrderRef ? `طلب إطلاق مؤكد ${mockOrderRef} — حُوّل لمدير المنصة` :
     intent === 'دعم_تقني' ? 'مشكلة تقنية لمشترك — تذكرة دعم' :
     intent === 'شكوى' ? 'شكوى/طلب استرداد' :
     intent === 'طلب_تحويل' ? 'طلب العميل محادثة بشرية' : undefined;
@@ -906,9 +1154,11 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     handoff,
     reason,
     intent,
-    sentiment: handoff ? 'negative' : /تحية|إيجابي|توصية|تفعيل/.test(intent) ? 'positive' : 'neutral',
+    orderRef: mockOrderRef,
+    quickReplies: mockButtons,
+    sentiment: intent === 'تأكيد_طلب' ? 'positive' : handoff ? 'negative' : /تحية|إيجابي|توصية|تفعيل/.test(intent) ? 'positive' : 'neutral',
     toolsCalled: [],
-    sideEffects: [],
+    sideEffects: mockSideEffects,
     usage: { promptTokens: 0, candidatesTokens: 0 },
     model: 'mock-engine',
     engine: 'mock',

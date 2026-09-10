@@ -2,16 +2,29 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
 import { log, uid } from '../lib/utils.js';
+import { store } from '../lib/store.js';
 import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
+import {
+  buildBlueprintText,
+  isProfileReady,
+  managerOrderMessage,
+  missingRequired,
+  nextQuestion,
+  orderSummaryLine,
+} from './onboarding.js';
+import type { RestaurantProfile } from '../types.js';
 
 /**
  * أدوات البوت الخاصة بمنصة مُريح (Function Calling).
  *
- * الأدوات الأربع:
- *  1. get_plan_details          — تفاصيل باقة بالأسعار الدقيقة (من src/agent/plans.ts)
- *  2. recommend_plan            — توصية حتمية بالباقة حسب الطاولات والاحتياجات
- *  3. capture_subscription_lead — تسجيل ليد اشتراك + حفظ data/leads.json + تنبيه الفريق
- *  4. create_support_ticket     — فتح تذكرة دعم للمشتركين + حفظ data/tickets.json + تنبيه
+ * الأدوات:
+ *  1. get_plan_details       — تفاصيل باقة بالأسعار الدقيقة (من src/agent/plans.ts)
+ *  2. recommend_plan         — توصية حتمية بالباقة حسب الطاولات والاحتياجات
+ *  3. save_restaurant_profile — حفظ تفاصيل المطعم تدريجيًا في ملف الجلسة
+ *  4. build_launch_blueprint — بناء التصور الكامل الجاهز للإطلاق من الملف
+ *  5. confirm_launch_order   — تأكيد الطلب + إرساله لمدير المنصة + تحويل المحادثة
+ *  6. create_support_ticket  — فتح تذكرة دعم للمشتركين + حفظ data/tickets.json + تنبيه
+ *  (capture_subscription_lead أُبقيت للتوافق فقط ولا تُعرض على النموذج)
  *
  * للتكامل مع نظام حقيقي: استبدل جسم كل دالة بنداء API — التوقيعات ثابتة.
  */
@@ -31,7 +44,7 @@ export interface ToolResult {
   userMessage?: string;
   /** إجراء جانبي يطلبه المنفّذ (مثل تنبيه الموظف) */
   sideEffect?: {
-    kind: 'send_media' | 'notify_human';
+    kind: 'send_media' | 'notify_human' | 'notify_manager';
     payload: Record<string, unknown>;
   };
 }
@@ -85,24 +98,50 @@ export const TOOL_DECLARATIONS = [
         },
       },
       {
-        name: 'capture_subscription_lead',
+        name: 'save_restaurant_profile',
         description:
-          'تسجيل طلب تفعيل اشتراك جديد. استدعِها فقط عندما يقرّر العميل الاشتراك فعليًا وبعد جمع البيانات المطلوبة. لا تستدعِها للاستفسارات العامة.',
+          'حفظ تفاصيل المطعم التي ذكرها العميل (اسم، مطعم، مدينة، فروع، طاولات، باقة، أصناف، شعار). استدعِها كلما ذكر العميل أي تفصيلة — كل الحقول اختيارية وتُدمج مع السابق. لا تسأل عن كل الحقول دفعة واحدة؛ سؤال واحد فقط في كل رد.',
         parameters: {
           type: 'OBJECT',
           properties: {
-            full_name: { type: 'STRING', description: 'اسم العميل الكامل' },
+            full_name: { type: 'STRING', description: 'اسم العميل' },
             restaurant_name: { type: 'STRING', description: 'اسم المطعم/المقهى' },
             city: { type: 'STRING', description: 'مدينة المطعم' },
+            branches: { type: 'NUMBER', description: 'عدد الفروع (1 لو فرع واحد)' },
             tables: { type: 'NUMBER', description: 'عدد الطاولات' },
             preferred_plan: {
               type: 'STRING',
               enum: ['starter', 'pro', 'enterprise'],
-              description: 'الباقة المختارة',
+              description: 'الباقة المختارة: starter=الأساسية، pro=الاحترافية، enterprise=المؤسسات',
             },
-            whatsapp_number: { type: 'STRING', description: 'رقم واتساب للتواصل (رقم العميل في الجلسة إن لم يذكر)' },
+            menu_items: { type: 'NUMBER', description: 'عدد أصناف المنيو التقريبي' },
+            has_logo: { type: 'BOOLEAN', description: 'هل الشعار/الهوية جاهزان عند العميل؟' },
+            notes: { type: 'STRING', description: 'أي ملاحظات إضافية ذكرها العميل' },
           },
-          required: ['full_name', 'restaurant_name', 'city', 'tables', 'preferred_plan', 'whatsapp_number'],
+          required: [],
+        },
+      },
+      {
+        name: 'build_launch_blueprint',
+        description:
+          'بناء «التصور الكامل الجاهز للإطلاق» من ملف المطعم المحفوظ (التجهيزات + السعر + خطوات الإطلاق). استدعِها فقط عندما يكتمل الملف الأساسي (الاسم، المطعم، المدينة، الطاولات، الباقة). اعرض نتيجتها على العميل كما هي ثم اطلب تأكيد الطلب.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {},
+          required: [],
+        },
+      },
+      {
+        name: 'confirm_launch_order',
+        description:
+          'تأكيد طلب الإطلاق وإرسال الملف الكامل لمدير المنصة وتحويل المحادثة إليه. استدعِها فقط بعد أن عرضت التصور على العميل ووافق عليه صراحة (نعم/أكيد/تم/أكّد). لا تستدعِها أبدًا قبل عرض التصور.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            confirmed: { type: 'BOOLEAN', description: 'تأكيد العميل الصريح (يجب أن يكون true)' },
+            notes: { type: 'STRING', description: 'ملاحظات أخيرة قبل الإرسال لمدير المنصة (اختياري)' },
+          },
+          required: ['confirmed'],
         },
       },
       {
@@ -131,7 +170,7 @@ export const TOOL_DECLARATIONS = [
 
 // ─────────────────────── حفظ ليدز/تذاكر (JSON ذرّي) ───────────────────────
 
-async function appendJsonFile(name: 'leads' | 'tickets', record: Record<string, unknown>): Promise<void> {
+async function appendJsonFile(name: 'leads' | 'tickets' | 'orders', record: Record<string, unknown>): Promise<void> {
   const file = path.join(config.paths.DATA_DIR, `${name}.json`);
   await fs.mkdir(path.dirname(file), { recursive: true });
 
@@ -200,7 +239,7 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
     };
   },
 
-  /** تسجيل ليد اشتراك جديد */
+  /** @deprecated استُبدلت بمسار التجهيز للإطلاق (profile→blueprint→confirm). تُبقى للتوافق الخلفي فقط. */
   async capture_subscription_lead(args, ctx) {
     const lead = {
       ref: `SUB-${uid('').slice(-6).toUpperCase()}`,
@@ -282,6 +321,117 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
       },
     };
   },
+
+  /** حفظ/دمج تفاصيل المطعم في ملف الجلسة — خطوة بخطوة */
+  save_restaurant_profile(args, ctx) {
+    const patch: Partial<RestaurantProfile> = {};
+    if (typeof args.full_name === 'string' && args.full_name.trim()) patch.full_name = args.full_name.trim().slice(0, 60);
+    if (typeof args.restaurant_name === 'string' && args.restaurant_name.trim()) patch.restaurant_name = args.restaurant_name.trim().slice(0, 80);
+    if (typeof args.city === 'string' && args.city.trim()) patch.city = args.city.trim().slice(0, 60);
+    if (typeof args.branches === 'number' && args.branches > 0) patch.branches = Math.min(500, Math.round(args.branches));
+    if (typeof args.tables === 'number' && args.tables > 0) patch.tables = Math.min(2000, Math.round(args.tables));
+    if (['starter', 'pro', 'enterprise'].includes(args.preferred_plan)) patch.preferred_plan = args.preferred_plan;
+    if (typeof args.menu_items === 'number' && args.menu_items > 0) patch.menu_items = Math.min(10000, Math.round(args.menu_items));
+    if (typeof args.has_logo === 'boolean') patch.has_logo = args.has_logo;
+    if (typeof args.notes === 'string' && args.notes.trim()) patch.notes = args.notes.trim().slice(0, 500);
+    if (!ctx.sessionKey.startsWith('tg:')) patch.whatsapp_number = ctx.sessionKey;
+    else if (typeof args.whatsapp_number === 'string' && args.whatsapp_number.trim()) patch.whatsapp_number = args.whatsapp_number.trim();
+
+    const profile = store.patchProfile(ctx.sessionKey, patch);
+    store.patchLaunch(ctx.sessionKey, { status: 'collecting' });
+    const missing = missingRequired(profile);
+    const ready = missing.length === 0;
+
+    log.tool(`save_restaurant_profile → ${ctx.sessionKey} | ناقص: ${missing.join(',') || 'لا شيء — جاهز ✅'}`);
+
+    return {
+      ok: true,
+      data: {
+        profile,
+        missing,
+        next_question: nextQuestion(profile),
+        ready_for_blueprint: ready,
+      },
+    };
+  },
+
+  /** بناء التصور الكامل الجاهز للإطلاق من الملف المحفوظ */
+  build_launch_blueprint(_args, ctx) {
+    const session = store.get(ctx.sessionKey);
+    const profile = session.profile ?? {};
+
+    if (!isProfileReady(profile)) {
+      const missing = missingRequired(profile);
+      log.tool(`build_launch_blueprint → ناقص: ${missing.join(',')}`);
+      return {
+        ok: false,
+        data: { missing, next_question: nextQuestion(profile) },
+        userMessage: '',
+      };
+    }
+
+    const blueprint = buildBlueprintText(profile);
+    store.patchLaunch(ctx.sessionKey, { status: 'awaiting_confirmation', blueprint });
+    log.tool(`build_launch_blueprint → ${ctx.sessionKey} | ${profile.restaurant_name} (${profile.city})`);
+
+    return {
+      ok: true,
+      data: { blueprint, ready: true },
+      userMessage:
+        blueprint +
+        '\n\nهذا تصور نسختك كاملًا 👆 راجعه، ولو كل شيء تمام اضغط *تأكيد الطلب* — وأي تعديل اكتبه لي وأنا أظبطه فورًا.',
+    };
+  },
+
+  /** تأكيد الطلب: حفظ + إرسال الملف الكامل لمدير المنصة + تحويل المحادثة */
+  async confirm_launch_order(args, ctx) {
+    const session = store.get(ctx.sessionKey);
+    const profile = session.profile ?? {};
+
+    if (args.confirmed !== true) {
+      return { ok: false, data: { error: 'لم يؤكد العميل بعد — اعرض التصور واطلب التأكيد الصريح أولًا' } };
+    }
+    if (!isProfileReady(profile)) {
+      return {
+        ok: false,
+        data: { error: 'الملف ناقص', missing: missingRequired(profile), next_question: nextQuestion(profile) },
+      };
+    }
+    if (session.launch?.status === 'confirmed' && session.launch.orderRef) {
+      return { ok: true, data: { order_ref: session.launch.orderRef, duplicate: true } };
+    }
+
+    if (typeof args.notes === 'string' && args.notes.trim()) {
+      store.patchProfile(ctx.sessionKey, { notes: args.notes.trim().slice(0, 500) });
+    }
+
+    const orderRef = `ORD-${uid('').slice(-6).toUpperCase()}`;
+    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef, confirmedAt: Date.now() });
+
+    const record = {
+      ref: orderRef,
+      ...store.get(ctx.sessionKey).profile,
+      sessionKey: ctx.sessionKey,
+      customer_name_profile: ctx.customerName || null,
+      summary: orderSummaryLine(store.get(ctx.sessionKey).profile ?? {}, orderRef),
+      created_at: new Date().toISOString(),
+    };
+    await appendJsonFile('orders', record);
+    log.tool(`confirm_launch_order → ${orderRef} | ${record.summary}`);
+
+    const managerNote = managerOrderMessage(store.get(ctx.sessionKey).profile ?? {}, orderRef, ctx.sessionKey);
+
+    return {
+      ok: true,
+      data: { order_ref: orderRef, summary: record.summary },
+      userMessage:
+        `تم تأكيد طلبك ✅ رقم الطلب: *${orderRef}*\n` +
+        `ملفك الكامل وصل *مدير المنصة* — يتواصل معك ويجهز نسختك، خلال دقائق عادة وبدون بطاقة للبدء 🚀\n` +
+        `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.`,
+      sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef } },
+    };
+  },
+
 };
 
 /** تنفيذ دالة بأمان مع التقاط أي خطأ */

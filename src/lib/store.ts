@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
-import type { ConversationState, Session, StoredMessage } from '../types.js';
+import type { ConversationState, LaunchState, RestaurantProfile, Session, StoredMessage } from '../types.js';
 import { log, uid } from './utils.js';
 
 /**
@@ -157,6 +157,24 @@ export class Store {
       s.language = lang;
       this.dirty = true;
     }
+  }
+
+  /** دمج حقول جديدة في ملف المطعم (مسار التجهيز للإطلاق) */
+  patchProfile(key: string, patch: Partial<RestaurantProfile>): RestaurantProfile {
+    const s = this.get(key);
+    s.profile = { ...(s.profile ?? {}), ...patch, updatedAt: Date.now() };
+    s.updatedAt = Date.now();
+    this.dirty = true;
+    return s.profile;
+  }
+
+  /** تحديث حالة طلب الإطلاق */
+  patchLaunch(key: string, patch: Partial<LaunchState>): LaunchState {
+    const s = this.get(key);
+    s.launch = { status: 'collecting', ...(s.launch ?? {}), ...patch, updatedAt: Date.now() };
+    s.updatedAt = Date.now();
+    this.dirty = true;
+    return s.launch;
   }
 
   /** إضافة رسالة واردة */
