@@ -7,6 +7,7 @@ import { TOOL_DECLARATIONS, runTool, type ToolContext, type ToolResult } from '.
 import { store } from '../lib/store.js';
 import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
 import { buildBlueprintText, managerOrderMessage, planIdFromText } from './onboarding.js';
+import { availability, formatAvailabilityText, nextAvailableDays } from './bookings.js';
 import {
   clampButtons,
   coherentQuickReplies,
@@ -1158,6 +1159,17 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     intent = 'عام';
     parts.push('أنا مساعد الفريق هنا على الدردشة، والزملاء البشريين معي لو احتجتهم 🙂');
     parts.push('تحب نمرّ على الباقات ولا أجهّز لك تفعيل؟');
+  } else if (/حجز|احجز|أحجز|موعد|مواعيد|المواعيد/.test(text)) {
+    intent = 'حجز';
+    const a = availability();
+    const next = nextAvailableDays(2);
+    if (next.length > 0) {
+      parts.push(`بتحجز موعد تفعيل مع الفريق؟ 👌 ساعات الحجز: ${formatAvailabilityText()}`);
+      parts.push(next.map((d) => `• ${d.date} (${d.dayName}): ${d.slots.join('، ')}`).join('\n'));
+      parts.push('أي تاريخ ووقت يناسبك؟ أتحقق لك وأثبّت الحجز.');
+    } else {
+      parts.push('ما في مواعيد متاحة حاليًا — بوصلك بالفريق يرتبون لك مباشرة.');
+    }
   } else if (!hasRealIntent && /كيفك|كيف حالك|شخبارك|عامل ايه|whats up/.test(text)) {
     intent = 'تحية';
     if (slots.restaurant || slots.tables) {

@@ -12,6 +12,16 @@ import {
   nextQuestion,
   orderSummaryLine,
 } from './onboarding.js';
+import {
+  availability,
+  availableSlotsForDate,
+  bookingStore,
+  bookingSummary,
+  checkSlot,
+  formatAvailabilityText,
+  nextAvailableDays,
+  serviceName,
+} from './bookings.js';
 import type { RestaurantProfile } from '../types.js';
 
 /**
@@ -162,6 +172,133 @@ export const TOOL_DECLARATIONS = [
             },
           },
           required: ['restaurant_name', 'issue', 'priority'],
+        },
+      },
+      {
+        name: 'get_menu',
+        description:
+          'جلب قائمة المنتجات/الخدمات بالأسعار الرسمية (باقات الاشتراك الثلاث: الأساسية/الاحترافية/المؤسسات). استخدمها عندما يسأل العميل «وش عندكم؟» أو يريد رؤية كل الخيارات والأسعار دفعة واحدة.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {},
+          required: [],
+        },
+      },
+      {
+        name: 'get_restaurant_info',
+        description:
+          'جلب معلومات النشاط الرسمية: الاسم، القنوات، ساعات عمل فريق الحجز/التفعيل. استخدمها عندما يسأل العميل عن ساعات العمل أو طرق التواصل أو معلومات عامة عن النشاط.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {},
+          required: [],
+        },
+      },
+      {
+        name: 'get_customer',
+        description:
+          'جلب بيانات العميل المحفوظة في الجلسة (الاسم، المطعم، المدينة، الطاولات، الباقة) مع حجوزاته النشطة. استخدمها قبل سؤال العميل عن بيانات سبق ذكرها، أو عندما يسأل عن حالة حجوزه.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {},
+          required: [],
+        },
+      },
+      {
+        name: 'check_availability',
+        description:
+          'التحقق من المواعيد المتاحة للحجز في تاريخ محدد (YYYY-MM-DD). أرجع الفتحات المتاحة فعلًا بعد خصم الإشغال. إن لم يحدد العميل تاريخًا، أرجع أقرب الأيام المتاحة. استخدمها دائمًا قبل عرض أي موعد أو تأكيد حجز — ولا تعرض موعدًا من عندك أبدًا.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            date: {
+              type: 'STRING',
+              description: 'التاريخ المطلوب بصيغة YYYY-MM-DD (اختياري — إن تُرك فارغًا تُرجع أقرب الأيام المتاحة)',
+            },
+            time: {
+              type: 'STRING',
+              description: 'وقت محدد بصيغة HH:MM للتحقق من فتحة معينة (اختياري)',
+            },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'create_booking',
+        description:
+          'إنشاء حجز (موعد تفعيل) للعميل بعد التأكد من التوفر. لا تستدعِها إلا بعد جمع: الباقة (الخدمة) + التاريخ + الوقت، وبعد نجاح check_availability. لا تؤكد للعميل أي حجز قبل نجاح هذه الأداة. اسم العميل/المطعم/المدينة/الطاولات تُؤخذ من ذاكرة الجلسة إن وُجدت.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            service: {
+              type: 'STRING',
+              enum: ['starter', 'pro', 'enterprise'],
+              description: 'الباقة المحجوزة (الخدمة): starter=الأساسية، pro=الاحترافية، enterprise=المؤسسات',
+            },
+            date: { type: 'STRING', description: 'تاريخ الحجز بصيغة YYYY-MM-DD' },
+            time: { type: 'STRING', description: 'وقت الحجز بصيغة HH:MM' },
+            full_name: { type: 'STRING', description: 'اسم العميل (اختياري إن كان محفوظًا في الجلسة)' },
+            restaurant_name: { type: 'STRING', description: 'اسم المطعم (اختياري)' },
+            city: { type: 'STRING', description: 'المدينة (اختياري)' },
+            tables: { type: 'NUMBER', description: 'عدد الطاولات (اختياري)' },
+            notes: { type: 'STRING', description: 'ملاحظات خاصة (اختياري)' },
+          },
+          required: ['service', 'date', 'time'],
+        },
+      },
+      {
+        name: 'update_booking',
+        description:
+          'تعديل حجز موجود (التاريخ/الوقت/الباقة/الملاحظات). حدد الحجز بمعرّفه booking_ref أو استخدم آخر حجز نشط للعميل. تحقق من التوفر الجديد أولًا بأداة check_availability قبل التعديل. لا تقل «تم التعديل» إلا بعد نجاح الأداة.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            booking_ref: { type: 'STRING', description: 'معرّف الحجز BKG-XXXXXX (اختياري — يُستخدم آخر حجز نشط إن تُرك فارغًا)' },
+            service: {
+              type: 'STRING',
+              enum: ['starter', 'pro', 'enterprise'],
+              description: 'الباقة الجديدة (اختياري)',
+            },
+            date: { type: 'STRING', description: 'التاريخ الجديد بصيغة YYYY-MM-DD (اختياري)' },
+            time: { type: 'STRING', description: 'الوقت الجديد بصيغة HH:MM (اختياري)' },
+            notes: { type: 'STRING', description: 'ملاحظات محدّثة (اختياري)' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'cancel_booking',
+        description:
+          'إلغاء حجز موجود. حدد الحجز بمعرّفه booking_ref أو استخدم آخر حجز نشط للعميل. اسأل العميل عن السبب بلطف قبل الإلغاء. لا تقل «تم الإلغاء» إلا بعد نجاح الأداة.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            booking_ref: { type: 'STRING', description: 'معرّف الحجز BKG-XXXXXX (اختياري — يُستخدم آخر حجز نشط إن تُرك فارغًا)' },
+            reason: { type: 'STRING', description: 'سبب الإلغاء (اختياري — مفيد لتقليل التكرار وتحسين الخدمة)' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'send_notification',
+        description:
+          'إرسال تنبيه داخلي للموظف البشري/مدير المنصة (لا يظهر نصه للعميل). استخدمها عند حجز/تعديل/إلغاء مهم، أو عند حالة تحتاج متابعة بشرية فورية. لا تستخدمها إلا لتنبيه الفريق بأمر يتطلب تدخلًا بشريًا.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            message: { type: 'STRING', description: 'نص التنبيه الداخلي للفريق' },
+            to: {
+              type: 'STRING',
+              enum: ['manager', 'human'],
+              description: 'جهة التنبيه: manager=مدير المنصة، human=الموظف البشري المناوب',
+            },
+            priority: {
+              type: 'STRING',
+              enum: ['low', 'normal', 'high', 'urgent'],
+              description: 'أولوية التنبيه (اختياري، الافتراضي normal)',
+            },
+          },
+          required: ['message'],
         },
       },
     ],
@@ -443,6 +580,315 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
         `ملفك الكامل وصل *مدير المنصة* — يتواصل معك ويجهز نسختك، خلال دقائق عادة وبدون بطاقة للبدء 🚀\n` +
         `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.`,
       sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef } },
+    };
+  },
+
+  // ─────────────────────── نظام الحجوزات (مواعيد التفعيل) ───────────────────────
+
+  /** قائمة المنتجات/الخدمات (الباقات) بالأسعار الرسمية */
+  get_menu() {
+    const lines = ['*باقاتنا الثلاث* — كلها بدون عقود وبدون رسوم مخفية:'];
+    for (const p of MUREEH_PLANS) {
+      lines.push(`• *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`);
+    }
+    lines.push('الدفع السنوي يوفّر شهرين كاملين مجانًا، ويمكن الترقية أو الإلغاء بأي وقت.');
+    log.tool('get_menu → 3 باقات');
+    return {
+      ok: true,
+      data: {
+        services: MUREEH_PLANS.map((p) => ({
+          id: p.id,
+          name: p.name,
+          priceMonthly: p.priceMonthly,
+          priceYearly: p.priceYearly,
+        })),
+      },
+      userMessage: lines.join('\n'),
+    };
+  },
+
+  /** معلومات النشاط الرسمية (هوية + قنوات + ساعات عمل فريق الحجز) */
+  get_restaurant_info() {
+    const lines = [
+      '*منصة مُريح* — نظام إدارة مطاعم ومقاهٍ سحابي (منيو QR، شاشة مطبخ حية، كاشير، تحليلات).',
+      '💬 تيليجرام المبيعات والدعم: +972 599 891 559',
+      `⏰ ساعات عمل فريق الحجز والتفعيل: ${formatAvailabilityText()}`,
+      '🤖 هذا البوت يرد عليك 24/7، والمتابعة البشرية خلال ساعات العمل.',
+    ];
+    log.tool('get_restaurant_info');
+    return {
+      ok: true,
+      data: {
+        name: config.bot.BUSINESS_NAME,
+        channels: 'telegram +972599891559',
+        working_hours: formatAvailabilityText(),
+        timezone: availability().timezone,
+      },
+      userMessage: lines.join('\n'),
+    };
+  },
+
+  /** بيانات العميل المحفوظة + حجوزاته النشطة */
+  get_customer(_args, ctx) {
+    const session = store.get(ctx.sessionKey);
+    const p = session.profile ?? {};
+    const bookings = bookingStore.bySession(ctx.sessionKey).filter((b) => b.status === 'confirmed');
+
+    const facts: string[] = [];
+    if (p.full_name) facts.push(`الاسم: ${p.full_name}`);
+    if (p.restaurant_name) facts.push(`المطعم: ${p.restaurant_name}`);
+    if (p.city) facts.push(`المدينة: ${p.city}`);
+    if (p.tables) facts.push(`الطاولات: ${p.tables}`);
+    if (p.preferred_plan) facts.push(`الباقة: ${serviceName(p.preferred_plan)}`);
+
+    const bLines = bookings.map((b) => `• ${b.ref} — ${b.date} ${b.time} — ${serviceName(b.service)}`);
+    log.tool(`get_customer → ${ctx.sessionKey} | حجوزات نشطة: ${bookings.length}`);
+
+    return {
+      ok: true,
+      data: {
+        profile: p,
+        active_bookings: bookings.map((b) => ({ ref: b.ref, date: b.date, time: b.time, service: b.service })),
+      },
+      userMessage: [
+        facts.length ? `بياناتك المسجلة عندي:\n${facts.join('\n')}` : 'لسا ما عندي تفاصيل كثيرة عنك — أول ما نكمّل الحجز بسجّلها.',
+        bookings.length
+          ? `حجوزاتك النشطة:\n${bLines.join('\n')}`
+          : 'ما عندك حجوزات نشطة حاليًا.',
+      ].join('\n\n'),
+    };
+  },
+
+  /** التحقق من التوفر (فتحات فعلية بعد خصم الإشغال) */
+  check_availability(args) {
+    const date = typeof args.date === 'string' && args.date.trim() ? args.date.trim() : '';
+
+    // تاريخ محدد
+    if (date) {
+      const res = availableSlotsForDate(date);
+      if (!res.ok) {
+        return {
+          ok: false,
+          data: { date, day: res.dayName, reason: res.reason },
+          userMessage: `${res.reason}.`,
+        };
+      }
+      // فتحة محددة؟
+      if (typeof args.time === 'string' && args.time.trim()) {
+        const s = checkSlot(date, args.time.trim());
+        if (!s.ok) {
+          return { ok: false, data: { date, time: args.time, reason: s.reason }, userMessage: s.reason! };
+        }
+        return {
+          ok: true,
+          data: { date, day: res.dayName, time: args.time, available: true },
+          userMessage: `متاح ✅ ${date} الساعة ${args.time}`,
+        };
+      }
+      const shown = res.slots.slice(0, 8);
+      return {
+        ok: true,
+        data: { date, day: res.dayName, slots: res.slots },
+        userMessage: [
+          `مواعيد *${date}* (${res.dayName}) المتاحة:`,
+          shown.map((s) => `• ${s}`).join('\n'),
+          res.slots.length > shown.length
+            ? `وعندنا ${res.slots.length - shown.length} مواعيد ثانية — قل لي الوقت اللي يناسبك وأتأكد لك.`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      };
+    }
+
+    // بدون تاريخ → أقرب أيام متاحة
+    const next = nextAvailableDays(3);
+    if (next.length === 0) {
+      return {
+        ok: false,
+        data: { next: [] },
+        userMessage: 'ما في مواعيد متاحة ضمن المدى الحالي — بوصلك بالفريق يرتبون لك مباشرة.',
+      };
+    }
+    const lines = ['أقرب أيام متاحة للحجز:'];
+    for (const d of next) lines.push(`• ${d.date} (${d.dayName}): ${d.slots.join('، ')}`);
+    return {
+      ok: true,
+      data: { next: next.map((d) => ({ date: d.date, day: d.dayName, slots: d.slots })) },
+      userMessage: lines.join('\n') + '\nأي تاريخ يناسبك؟',
+    };
+  },
+
+  /** إنشاء حجز — لا نجاح إلا بعد التحقق من التوفر فعليًا */
+  create_booking(args, ctx) {
+    const service = ['starter', 'pro', 'enterprise'].includes(args.service) ? (args.service as PlanId) : '';
+    if (!service) return { ok: false, data: { error: 'الباقة (الخدمة) غير محددة' } };
+
+    const date = String(args.date ?? '').trim();
+    const time = String(args.time ?? '').trim();
+    if (!date || !time) {
+      return { ok: false, data: { error: 'التاريخ والوقت مطلوبان للحجز' } };
+    }
+
+    const slot = checkSlot(date, time);
+    if (!slot.ok) {
+      return {
+        ok: false,
+        data: { error: slot.reason },
+        userMessage: `ما أقدر أحجز هالموعد — ${slot.reason}. أعطني وقتًا ثاني أو خلّني أعرض لك المتاح.`,
+      };
+    }
+
+    const p = store.get(ctx.sessionKey).profile ?? {};
+    const booking = bookingStore.create({
+      service,
+      date,
+      time,
+      fullName: typeof args.full_name === 'string' && args.full_name.trim() ? args.full_name.trim().slice(0, 60) : p.full_name,
+      restaurantName: typeof args.restaurant_name === 'string' && args.restaurant_name.trim() ? args.restaurant_name.trim().slice(0, 80) : p.restaurant_name,
+      city: typeof args.city === 'string' && args.city.trim() ? args.city.trim().slice(0, 60) : p.city,
+      tables: typeof args.tables === 'number' && args.tables > 0 ? Math.round(args.tables) : p.tables,
+      contact: ctx.sessionKey,
+      notes: typeof args.notes === 'string' && args.notes.trim() ? args.notes.trim().slice(0, 300) : undefined,
+    });
+
+    // ثبّت أي بيانات جديدة في ذاكرة العميل الدائمة حتى لا يُعاد السؤال عنها لاحقًا
+    const patch: Partial<RestaurantProfile> = {};
+    if (booking.fullName) patch.full_name = booking.fullName;
+    if (booking.restaurantName) patch.restaurant_name = booking.restaurantName;
+    if (booking.city) patch.city = booking.city;
+    if (booking.tables) patch.tables = booking.tables;
+    if (Object.keys(patch).length) store.patchProfile(ctx.sessionKey, patch);
+
+    const note =
+      `🗓️ *حجز تفعيل جديد* ${booking.ref}\n` +
+      `👤 ${booking.fullName ?? '—'}\n` +
+      `🍽️ ${booking.restaurantName ?? '—'}${booking.city ? ` — ${booking.city}` : ''}\n` +
+      `📦 ${serviceName(booking.service)}${booking.tables ? ` · ${booking.tables} طاولة` : ''}\n` +
+      `📅 ${booking.date} ${booking.time}\n` +
+      `💬 ${ctx.sessionKey}`;
+
+    return {
+      ok: true,
+      data: { ref: booking.ref, date: booking.date, time: booking.time, service: booking.service },
+      userMessage:
+        `تم حجز موعد التفعيل ✅\n` +
+        `رقم الحجز: *${booking.ref}*\n` +
+        `📅 ${booking.date} · الساعة ${booking.time}\n` +
+        `📦 ${serviceName(booking.service)}\n\n` +
+        `فريقنا يتواصل معك في الموعد على رقمك. ولو تغيّر عندك شي، تقدر تعدّل أو تلغي بأي وقت وأنا أظبطه لك.`,
+      sideEffect: { kind: 'notify_manager', payload: { note, orderRef: booking.ref } },
+    };
+  },
+
+  /** تعديل حجز — تحقق من التوفر الجديد ثم نفّذ */
+  update_booking(args, ctx) {
+    const ref = typeof args.booking_ref === 'string' && args.booking_ref.trim() ? args.booking_ref.trim().toUpperCase() : '';
+    const booking = ref ? bookingStore.byRef(ref) : bookingStore.latestActive(ctx.sessionKey);
+    if (!booking) {
+      return {
+        ok: false,
+        data: { error: 'لا يوجد حجز' },
+        userMessage: 'ما لقيت حجز مسجل عندك لأعدّله. تبيني أتحقق لك من المواعيد المتاحة وأحجز لك واحد جديد؟',
+      };
+    }
+    if (booking.status !== 'confirmed') {
+      return {
+        ok: false,
+        data: { error: 'الحجز ليس نشطًا' },
+        userMessage: 'هذا الحجز مو نشط (ملغى أو مكتمل). تبيني أجهز لك حجز جديد؟',
+      };
+    }
+
+    const newDate = typeof args.date === 'string' && args.date.trim() ? args.date.trim() : booking.date;
+    const newTime = typeof args.time === 'string' && args.time.trim() ? args.time.trim() : booking.time;
+    const newService = ['starter', 'pro', 'enterprise'].includes(args.service) ? (args.service as PlanId) : booking.service;
+
+    if (newDate !== booking.date || newTime !== booking.time) {
+      const slot = checkSlot(newDate, newTime, booking.ref);
+      if (!slot.ok) {
+        const alt = availableSlotsForDate(newDate);
+        const suggestion = alt.ok && alt.slots.length ? ` أقرب بديل في ${newDate}: ${alt.slots.slice(0, 3).join('، ')}` : '';
+        return {
+          ok: false,
+          data: { error: slot.reason },
+          userMessage: `ما أقدر أنقل الحجز لهالموعد — ${slot.reason}.${suggestion}`,
+        };
+      }
+    }
+
+    const updated = bookingStore.update(booking.ref, {
+      service: newService,
+      date: newDate,
+      time: newTime,
+      notes: typeof args.notes === 'string' && args.notes.trim() ? args.notes.trim().slice(0, 300) : booking.notes,
+    });
+    if (!updated) {
+      return { ok: false, data: { error: 'تعذّر التحديث' }, userMessage: 'صار خطأ مؤقت بالتعديل — بوصلك بالفريق يظبطونه لك.' };
+    }
+
+    const note =
+      `✏️ *تعديل حجز* ${updated.ref}\n` +
+      `👤 ${updated.fullName ?? '—'}\n` +
+      `📅 ${updated.date} ${updated.time}\n` +
+      `📦 ${serviceName(updated.service)}`;
+    return {
+      ok: true,
+      data: { ref: updated.ref, date: updated.date, time: updated.time, service: updated.service },
+      userMessage:
+        `ظبطت تعديلك ✅ الحجز *${updated.ref}* صار:\n` +
+        `📅 ${updated.date} · الساعة ${updated.time}\n` +
+        `📦 ${serviceName(updated.service)}`,
+      sideEffect: { kind: 'notify_manager', payload: { note, orderRef: updated.ref } },
+    };
+  },
+
+  /** إلغاء حجز — لا «تم الإلغاء» إلا بعد النجاح */
+  cancel_booking(args, ctx) {
+    const ref = typeof args.booking_ref === 'string' && args.booking_ref.trim() ? args.booking_ref.trim().toUpperCase() : '';
+    const booking = ref ? bookingStore.byRef(ref) : bookingStore.latestActive(ctx.sessionKey);
+    if (!booking) {
+      return { ok: false, data: { error: 'لا يوجد حجز' }, userMessage: 'ما لقيت حجز مسجل عندك للإلغاء.' };
+    }
+    if (booking.status !== 'confirmed') {
+      return {
+        ok: true,
+        data: { ref: booking.ref, already: booking.status },
+        userMessage: `حجزك *${booking.ref}* مو نشط أصلًا (حالته: ${booking.status === 'cancelled' ? 'ملغى' : 'مكتمل'}).`,
+      };
+    }
+
+    const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim().slice(0, 200) : undefined;
+    const cancelled = bookingStore.cancel(booking.ref, reason);
+    if (!cancelled) {
+      return { ok: false, data: { error: 'تعذّر الإلغاء' }, userMessage: 'صار خطأ مؤقت بالإلغاء — بوصلك بالفريق يتأكدون منه.' };
+    }
+
+    const note =
+      `❌ *إلغاء حجز* ${cancelled.ref}\n` +
+      `👤 ${cancelled.fullName ?? '—'}\n` +
+      `📅 ${cancelled.date} ${cancelled.time}${reason ? `\n📝 السبب: ${reason}` : ''}`;
+    return {
+      ok: true,
+      data: { ref: cancelled.ref, status: 'cancelled' },
+      userMessage:
+        `تم إلغاء حجزك *${cancelled.ref}* (${cancelled.date} — ${cancelled.time}). لو حاب نحجز لك موعد بديل، أنا جاهز.`,
+      sideEffect: { kind: 'notify_manager', payload: { note, orderRef: cancelled.ref } },
+    };
+  },
+
+  /** تنبيه داخلي للموظف/المدير (لا يظهر نصه للعميل) */
+  send_notification(args) {
+    const message = String(args.message ?? '').trim();
+    if (!message) return { ok: false, data: { error: 'نص التنبيه مطلوب' } };
+    const to = args.to === 'manager' ? 'manager' : 'human';
+    const priority = ['low', 'normal', 'high', 'urgent'].includes(args.priority) ? args.priority : 'normal';
+    const note = `🔔 تنبيه${priority !== 'normal' ? ` [${priority}]` : ''}: ${message}`;
+    log.tool(`send_notification → ${to} [${priority}]`);
+    return {
+      ok: true,
+      data: { sent: true, to, priority },
+      sideEffect: { kind: to === 'manager' ? 'notify_manager' : 'notify_human', payload: { note } },
     };
   },
 
