@@ -119,7 +119,7 @@ export const config = {
      * رقم مدير المنصة (واتساب، أرقام فقط) — تُرسل إليه طلبات الإطلاق
      * المؤكدة كاملةً فور تأكيد العميل، وتُحوَّل إليه المحادثة.
      */
-    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', '970593498909'),
+    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', '972599891559'),
   },
 
   /** تيليجرام — القناة البديلة/المكمّلة */
@@ -130,6 +130,8 @@ export const config = {
     WEBHOOK_URL: str('TELEGRAM_WEBHOOK_URL', ''),
     /** سر تحقق إضافي في webhook (يوضع في ?secret_token=) */
     WEBHOOK_SECRET: str('TELEGRAM_WEBHOOK_SECRET', ''),
+    /** هاتف المدير لتيليجرام / التواصل */
+    MANAGER_PHONE: str('TELEGRAM_MANAGER_PHONE', '+972599891559'),
     /** معرف الدردشة الإدارية الذي يستقبل تنبيهات التحويل/الليدات (اختياري) */
     HUMAN_CHAT_ID: str('TELEGRAM_HUMAN_CHAT_ID', ''),
     /** معرف دردشة المدير الذي يستلم إشعارات طلبات الشراء والإطلاق */

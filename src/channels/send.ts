@@ -120,10 +120,14 @@ export async function notifyManager(note: string, orderRef?: string): Promise<bo
   let delivered = false;
 
   // 1) الإرسال عبر تيليجرام للمدير
-  const tgChatId = config.telegram.MANAGER_CHAT_ID || config.telegram.HUMAN_CHAT_ID;
+  let tgChatId = config.telegram.MANAGER_CHAT_ID || config.telegram.HUMAN_CHAT_ID;
+  if (tgChatId && (tgChatId.startsWith('+') || tgChatId === '972599891559' || tgChatId === '00972599891559' || tgChatId === '0599891559')) {
+    // تيليجرام Bot API يتطلب chat_id رقمي؛ نستخدم معرّف المدير المؤكد
+    tgChatId = '7687559523';
+  }
   if (tgChatId && config.telegram.TOKEN) {
     try {
-      log.ok(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة عبر تيليجرام (${tgChatId})`);
+      log.ok(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة عبر تيليجرام (${tgChatId} — ${config.telegram.MANAGER_PHONE})`);
       const r = await tgSendText(tgChatId, note);
       if (r.ok) {
         delivered = true;

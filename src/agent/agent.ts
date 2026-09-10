@@ -27,6 +27,7 @@ import type {
   ConversationState,
   DashboardEvent,
   MediaPart,
+  RestaurantProfile,
   StoredMessage,
   WaMessageType,
 } from '../types.js';
@@ -198,6 +199,13 @@ export class AgentOrchestrator {
           return;
         }
 
+        // استخراج فوري وتلقائي لأي بيانات يذكرها العميل وتثبيتها في الذاكرة الدائمة
+        const extracted = autoExtractFacts(batch.map((b) => b.body), session.profile);
+        if (Object.keys(extracted).length > 0) {
+          store.patchProfile(key, extracted);
+          log.info(`🧠 [${key}] استخراج تلقائي وحفظ في الذاكرة الدائمة: ${JSON.stringify(extracted)}`);
+        }
+
         // جلسة قديمة → لخصّ المحادثة السابقة قبل المتابعة
         if (store.rotateIfStale(session)) {
           log.info(`${key}: انتهت مهلة الجلسة — بدء سياق جديد مع الاحتفاظ بالملخص`);
@@ -240,6 +248,8 @@ export class AgentOrchestrator {
           sessionLanguage: session.language,
           summary: session.summary,
           toolsEnabled: config.bot.TOOLS_ENABLED,
+          profile: session.profile,
+          launch: session.launch,
         });
 
         const extraBits: string[] = [];
@@ -255,11 +265,18 @@ export class AgentOrchestrator {
         extraBits.push(`[جزء اليوم: ${dayPart()} — حيِّ به فقط في أول تواصل أو بعد انقطاع.]`);
         const sales = salesHint(batch.map((b) => b.body).join('\n'), session.summary);
         if (sales) extraBits.push(sales);
+        const hasKnownData = Boolean(
+          session.profile?.tables ||
+          session.profile?.restaurant_name ||
+          session.profile?.preferred_plan ||
+          session.summary ||
+          session.launch?.orderRef
+        );
         const inboundCount = session.messages.filter((m) => m.dir === 'in').length;
-        if (inboundCount <= batch.length) {
+        if (hasKnownData || inboundCount > 1) {
+          extraBits.push('[تنبيه ذاكرة صارم: العميل معروف ولديه بيانات ومحادثة مسجلة أعلاه — ممنوع نهائيًا إعادة سؤاله عن أي معلومة مسجلة (خاصة: كم طاولة عندك، اسم المطعم، المدينة) وابدأ مباشرة بالإجابة عما طلبه دون إعادة التعريف بنفسك.]');
+        } else {
           extraBits.push('[أول تواصل في هذه الجلسة — قدّم نفسك بجملة واحدة حيّة ثم اسأل سؤالًا واحدًا.]');
-        } else if (inboundCount > 1) {
-          extraBits.push('[عميل عائد في نفس الجلسة — لا تُعِد التعريف الكامل ولا التحية الرسمية.]');
         }
         const extraContext = extraBits.length ? extraBits.join('\n') : undefined;
 
@@ -588,7 +605,7 @@ export class AgentOrchestrator {
         store.delete(key);
         store.addSystem(key, '🔄 تم تصفير المحادثة بطلب العميل');
         this.emit({ t: 'status', sessionKey: key, state: 'bot', note: 'تصفير' });
-        await this.replyAndRecord(key, 'صفحة جديدة، خلّينا نبدأ من الصفر ✨ كم طاولة تشتغل عندك؟', { phoneNumberId: msg.phoneNumberId });
+        await this.replyAndRecord(key, 'صفحة جديدة، خلّينا نبدأ من الصفر ✨ كيف أقدر أساعد مطعمك؟', { phoneNumberId: msg.phoneNumberId });
         break;
       }
 
@@ -659,6 +676,55 @@ export class AgentOrchestrator {
 
 type CommandName = 'bot' | 'human' | 'pause' | 'resume' | 'reset' | 'help';
 
+/** استخراج ذكي وتلقائي لبيانات المطعم من رسائل العميل وحفظها في الذاكرة الدائمة */
+function autoExtractFacts(texts: string[], existingProfile?: RestaurantProfile): Partial<RestaurantProfile> {
+  const combined = texts.join('\n');
+  const patch: Partial<RestaurantProfile> = {};
+
+  // 1. عدد الطاولات (مثل: "35 طاولة", "35", "عندي 25 طاولة", "35 طاوله")
+  const tableMatch = combined.match(/(?:^|\s|[^\d])(\d{1,3})\s*(?:طاولة|طاولات|طاوله|طاو|table|tables)\b/i)
+    || (texts.length === 1 && /^\s*(\d{1,3})\s*$/.test(combined) && !existingProfile?.tables ? combined.match(/^\s*(\d{1,3})\s*$/) : null);
+  if (tableMatch) {
+    const num = parseInt(tableMatch[1], 10);
+    if (num > 0 && num <= 2000) {
+      patch.tables = num;
+    }
+  }
+
+  // 2. اسم المطعم
+  const restMatch = combined.match(/(?:اسم المطعم|المطعم اسمه|اسمه|مطعمنا|كافيه|مقهى|مطعم)\s*[:=]?\s*([A-Za-z\u0621-\u064A0-9\s'-]{2,50})/i);
+  if (restMatch && !existingProfile?.restaurant_name) {
+    const rName = restMatch[1].trim();
+    if (!/^(ايش|شو|كم|بكم|في|على|هو|جديد|صغير|كبير)/.test(rName)) {
+      patch.restaurant_name = rName;
+    }
+  }
+
+  // 3. المدينة
+  const cityMatch = combined.match(/(?:بمدينة|في مدينة|مدينة|في|بـ)\s+([A-Za-z\u0621-\u064A\s]{3,30})/i)
+    || combined.match(/\b(غزة|القدس|رام الله|نابلس|الخليل|جنين|طولكرم|قلقيلية|أريحا|بيت لحم|خانيونس|رفح|حيفا|يافا|عكا|الناصرة|تل أبيب|عمان|الرياض|جدة|دبي|القاهرة|Gaza|Ramallah|Jerusalem)\b/i);
+  if (cityMatch && !existingProfile?.city) {
+    patch.city = cityMatch[1].trim();
+  }
+
+  // 4. الباقة المفضلة
+  if (/أساسية|اساسية|starter/i.test(combined)) {
+    patch.preferred_plan = 'starter';
+  } else if (/احترافية|احتراف|pro\b/i.test(combined)) {
+    patch.preferred_plan = 'pro';
+  } else if (/مؤسسات|سلاسل|enterprise/i.test(combined)) {
+    patch.preferred_plan = 'enterprise';
+  }
+
+  // 5. اسم العميل
+  const nameMatch = combined.match(/(?:اسمي|معك|أنا)\s+([A-Za-z\u0621-\u064A\s]{3,40})/i);
+  if (nameMatch && !existingProfile?.full_name) {
+    patch.full_name = nameMatch[1].trim();
+  }
+
+  return patch;
+}
+
 /**
  * تلميح بيعي ذكي يُحقن في سياق النموذج حسب كلام العميل.
  * يوجّه «الخبير البشري» لمعالجة الاعتراض الصحيح بدل الرد العام —
@@ -677,7 +743,7 @@ function salesHint(userText: string, summary: string): string | null {
     return '[دليل بيعي: خوف من التعقيد — طمئنه: يعمل على أجهزته الحالية بدون معدات، التفعيل خلال دقائق، والفريق يجهّز كل شيء معه خطوة بخطوة. ثم سؤال واحد.]';
   }
   if (/مطعم صغير|كشك|فود ترك|كافيه صغير|طاولات قليلة|عدد قليل|\b([1-9]|1[0-4])\s*(طاولة|طاولات|طاو)\b/.test(t)) {
-    return '[دليل بيعي: يظن النظام أكبر منه — وضّح أن الأساسية تبدأ من 149₪ وتعمل من أول طاولة، والترقية لاحقًا بضغطة من اللوحة. ثم سؤال واحد.]';
+    return '[دليل بيعي: يظن النظام أكبر منه — وضّح أن الأساسية تبدأ من 300₪ وتعمل من أول طاولة، والترقية لاحقًا بضغطة من اللوحة. ثم سؤال واحد.]';
   }
   if (/فروع|سلسلة|سلاسل|فرع ثاني|فرع جديد/.test(t)) {
     return '[دليل بيعي: عميل سلاسل/فروع (قيمة عالية) — ركّز على باقة المؤسسات: إدارة الفروع، السعة المفتوحة، النطاق الخاص، ومدير الحساب. اسأل عن عدد الفروع الحالي.]';

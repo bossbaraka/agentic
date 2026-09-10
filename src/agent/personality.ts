@@ -102,9 +102,9 @@ export function fallbackQuickReplies(intent?: string): QuickReply[] {
     case 'استفسار_أسعار':
     case 'استفسار_باقات':
       return [
-        { id: 'qr:starter', title: 'الأساسية 149₪' },
-        { id: 'qr:pro', title: 'الاحترافية 299₪' },
-        { id: 'qr:enterprise', title: 'المؤسسات 799₪' },
+        { id: 'qr:starter', title: 'الأساسية 300₪' },
+        { id: 'qr:pro', title: 'الاحترافية 550₪' },
+        { id: 'qr:enterprise', title: 'المؤسسات 850₪' },
       ];
     case 'توصية_باقة':
       return [
@@ -170,7 +170,7 @@ function buttonKeywords(b: QuickReply): string[] {
   if (/confirm/.test(id) || /تأكيد|أكّد/.test(t)) words.push('تأكيد', 'أكّد', 'تمام');
   if (/ثبت/.test(t)) words.push('ثبت');
   if (/edit|modify/.test(id) || /تعديل|غيّر|غير/.test(t)) words.push('تعديل', 'غيّر', 'تغيير');
-  if (/prices|starter|pro|enterprise/.test(id) || /باق|سعر|أسعار|أساسية|احترافية|مؤسسات|149|299|799/.test(t)) words.push('باق', 'سعر', 'أسعار', 'أساسية', 'احترافية', 'مؤسسات');
+  if (/prices|starter|pro|enterprise/.test(id) || /باق|سعر|أسعار|أساسية|احترافية|مؤسسات|300|550|850/.test(t)) words.push('باق', 'سعر', 'أسعار', 'أساسية', 'احترافية', 'مؤسسات');
   if (/activate/.test(id) || /تفعيل|اشتر|ابدأ|أبدأ|نبدأ/.test(t)) words.push('تفعيل', 'اشتر', 'ابدأ', 'نبدأ', 'أجهّز');
   if (/recommend/.test(id) || /أنصح|الأنسب/.test(t)) words.push('أنصح', 'أنسب', 'طاولة');
   if (/yearly/.test(id) || /سنوي|توفير/.test(t)) words.push('سنوي', 'توفير');

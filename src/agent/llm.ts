@@ -1027,16 +1027,25 @@ function parseActivationSlots(turns: Turn[]): {
   const slots: { name?: string; restaurant?: string; city?: string; tables?: number; plan?: PlanId } = {};
   for (let i = 0; i < turns.length; i++) {
     const t = turns[i]!;
-    if (t.role !== 'model') continue;
+    if (t.role !== 'model') {
+      const u = t.text;
+      const mTables = u.match(/(?:^|\s|[^\d])(\d{1,3})\s*(?:طاولة|طاولات|طاوله|طاو|table|tables)\b/i)
+        || (u.trim().match(/^\d{1,3}$/) ? u.trim().match(/^(\d{1,3})$/) : null);
+      if (mTables && !slots.tables) slots.tables = Number(mTables[1]);
+      if (/أساسية|اساسية|starter/i.test(u) && !slots.plan) slots.plan = 'starter';
+      else if (/احترافية|احتراف|pro\b/i.test(u) && !slots.plan) slots.plan = 'pro';
+      else if (/مؤسسات|سلاسل|enterprise/i.test(u) && !slots.plan) slots.plan = 'enterprise';
+      continue;
+    }
     const next = turns[i + 1];
     const u = next && next.role === 'user' ? next.text.trim().split('\n')[0]!.trim() : '';
     if (/شو اسمك/.test(t.text)) {
       if (u && u.split(/\s+/).length <= 4) slots.name = u.slice(0, 40);
-    } else if (/واسم المطعم/.test(t.text)) {
+    } else if (/واسم المطعم|اسم المطعم/.test(t.text)) {
       if (u) slots.restaurant = u.slice(0, 60);
     } else if (/بأي مدينة/.test(t.text)) {
       if (u) slots.city = u.slice(0, 40);
-    } else if (/كم طاولة تشتغل عندك\؟/.test(t.text)) {
+    } else if (/كم طاولة تشتغل عندك\؟|كم طاولة عندك/.test(t.text)) {
       const m = u.match(/(\d{1,3})/);
       if (m) slots.tables = Number(m[1]);
     } else if (/نثبت على/.test(t.text)) {
@@ -1078,7 +1087,8 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
   const text = raw.toLowerCase();
   const hasMedia = Boolean(lastUser?.media?.length);
   const lastModelText = [...input.turns].reverse().find((t) => t.role === 'model')?.text ?? '';
-  const name = nameFromPrompt(input.systemPrompt);
+  const slots = collectSlots(input.turns, input.toolContext.sessionKey);
+  const name = slots.name || nameFromPrompt(input.systemPrompt);
   const vocative = name ? `${name}، ` : '';
   const askedActivation = /أجهّز لك التفعيل|أجهز لك التفعيل|أجهز التفعيل|تبيني أجه|خلّينا نجه|شو اسمك|أرسل لي: اسمك/.test(lastModelText);
   const askedName = /شو اسمك|ما اسمك|اسمك\؟/.test(lastModelText);
@@ -1102,9 +1112,9 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
   const planList = () =>
     MUREEH_PLANS.map((p) => {
       const short =
-        p.id === 'starter' ? 'منيو QR + كاشير + استدعاء نادل' :
-        p.id === 'pro' ? '+ شاشة مطبخ KDS، POS، تحليلات، هوية بصرية' :
-        'فروع متعددة، سعة مفتوحة، مدير حساب خاص';
+        p.id === 'starter' ? 'منيو رقمي فاخر QR + كاشير + استدعاء نادل' :
+        p.id === 'pro' ? 'شاشة مطبخ KDS، POS، تحليلات، هوية بصرية' :
+        'فروع متعددة، سعة مفتوحة، نطاق خاص، مدير حساب';
       return `• *${p.name}* — *${p.priceMonthly} ₪/شهر* (${short})${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`;
     }).join('\n');
 
@@ -1132,12 +1142,29 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     parts.push('تحب نمرّ على الباقات ولا أجهّز لك تفعيل؟');
   } else if (!hasRealIntent && /كيفك|كيف حالك|شخبارك|عامل ايه|whats up/.test(text)) {
     intent = 'تحية';
-    parts.push(`${vocative}تمام والحمد لله، وأنت؟ 🙌 خلينا نفيد مطعمك: كم طاولة تشتغل عندك؟`);
+    if (slots.restaurant || slots.tables) {
+      parts.push(`${vocative}تمام والحمد لله، وأنت؟ 🙌 كيف أقدر أساعد ${slots.restaurant ? `مطعم ${slots.restaurant}` : 'مطعمك'} اليوم؟`);
+    } else {
+      parts.push(`${vocative}تمام والحمد لله، وأنت؟ 🙌 خلينا نفيد مطعمك: كم طاولة تشتغل عندك؟`);
+    }
   } else if (!hasRealIntent && ((/سلام|مرحبا|هلا|اهلا|أهلًا|hi\b|hello|hey|صباح|مساء/.test(text) && text.length < 80) || click && /هلا|hi/.test(text))) {
     intent = 'تحية';
     const g = greetingWord(dayPart());
-    parts.push(`${g}${name ? ` ${name}` : ''} 👋 أنا ${config.bot.BOT_NAME} — منيو QR، شاشة مطبخ حية، وكاشير من الرمز على الطاولة.`);
-    parts.push('كم طاولة تشتغل عندك؟ أحسب لك الباقة اللي تفرق معك فعلًا.');
+    if (slots.restaurant || slots.tables) {
+      parts.push(`${g}${name ? ` ${name}` : ''} 👋 أنا ${config.bot.BOT_NAME} — معك في ${slots.restaurant ? `مطعم ${slots.restaurant}` : 'مطعمك'}.`);
+      if (slots.tables && slots.plan) {
+        const p = getPlan(slots.plan);
+        parts.push(`مسجل عندي *${slots.tables} طاولة* على *${p.name}*. تفضل، كيف أقدر أخدمك اليوم؟`);
+      } else if (slots.tables) {
+        const rec = recommendPlan({ tables: slots.tables });
+        parts.push(`مسجل عندي *${slots.tables} طاولة* — أنسب باقة لك هي *${rec.plan.name}*. تبيني أجهز لك التفعيل؟`);
+      } else {
+        parts.push('كيف أقدر أساعدك اليوم بخصوص تفاصيل وتطوير مطعمك؟');
+      }
+    } else {
+      parts.push(`${g}${name ? ` ${name}` : ''} 👋 أنا ${config.bot.BOT_NAME} — منيو QR، شاشة مطبخ حية، وكاشير من الرمز على الطاولة.`);
+      parts.push('كم طاولة تشتغل عندك؟ أحسب لك الباقة اللي تفرق معك فعلًا.');
+    }
   } else if (askedName && raw.trim().split(/\s+/).length <= 4 && !/سعر|باقة/.test(text)) {
     intent = 'طلب_تفعيل';
     parts.push(`تسلم${name ? ' ' + name : ''}. واسم المطعم؟`);
@@ -1178,7 +1205,7 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     }
   }
 
-  if (parts.length === 0 && !askedPlanConfirm && (/فروع|سلسلة|سلاسل|enterprise|chain|المؤسسات 799|qr:enterprise/.test(text))) {
+  if (parts.length === 0 && !askedPlanConfirm && (/فروع|سلسلة|سلاسل|enterprise|chain|المؤسسات 850|qr:enterprise/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('enterprise');
     parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* (≈ ${p.priceYearlyPerMonth} ₪ عند السنوي):`);
@@ -1186,7 +1213,7 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     parts.push('كم فرعًا عندك حاليًا؟');
   }
 
-  if (parts.length === 0 && !askedPlanConfirm && (/احتراف|pro|kds|مطبخ|pos|الاحترافية 299|qr:pro/.test(text))) {
+  if (parts.length === 0 && !askedPlanConfirm && (/احتراف|pro|kds|مطبخ|pos|الاحترافية 550|qr:pro/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('pro');
     parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر* ← الأكثر طلبًا.`);
@@ -1194,17 +1221,26 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     parts.push('تبيني أجهّز لك التفعيل؟');
   }
 
-  if (parts.length === 0 && !askedPlanConfirm && (/أساسية|starter|الأساسية 149|qr:starter/.test(text))) {
+  if (parts.length === 0 && !askedPlanConfirm && (/أساسية|starter|الأساسية 300|qr:starter/.test(text))) {
     intent = 'استفسار_باقات';
     const p = getPlan('starter');
     parts.push(`*${p.name}* — *${p.priceMonthly} ₪/شهر*. بداية نظيفة لمنيو QR وكاشير واستدعاء نادل.`);
-    parts.push('تقدر ترقّي في أي وقت من اللوحة. كم طاولة عندك؟');
+    if (slots.tables) {
+      parts.push(`لمطعمك (${slots.tables} طاولة) السعر بيكون ~*${perTableMonthly(p, slots.tables)} ₪* بس للطاولة. تبيني أجهّز لك التفعيل؟`);
+    } else {
+      parts.push('تقدر ترقّي في أي وقت من اللوحة. كم طاولة عندك؟');
+    }
   }
 
   if (parts.length === 0 && (/سعر|أسعار|اسعار|بكم|تكلف|باقة|باقات|price|plan|package|الأسعار والباقات|qr:prices|أنصحني/.test(text))) {
     intent = 'استفسار_أسعار';
     parts.push(`ثلاث باقات، بدون عقود وبدون رسوم مخفية:\n${planList()}\n\nالدفع السنوي يوفّر شهرين كاملين.`);
-    parts.push('كم طاولة تشتغل عندك؟ أحسب لك الأنسب.');
+    if (slots.tables) {
+      const rec = recommendPlan({ tables: slots.tables });
+      parts.push(`بما أن مسجل عندي *${slots.tables} طاولة*، فالأنسب لك هي *${rec.plan.name}* (~*${perTableMonthly(rec.plan, slots.tables)} ₪* للطاولة). تبيني أجهّز لك التفعيل؟`);
+    } else {
+      parts.push('كم طاولة تشتغل عندك؟ أحسب لك الأنسب.');
+    }
   }
 
   if (parts.length === 0 && askedActivation && isAffirmative(raw)) {
@@ -1220,7 +1256,18 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
 
   if (parts.length === 0 && askedCity && raw.trim()) {
     intent = 'تجهيز_إطلاق';
-    parts.push('ممتاز. كم طاولة تشتغل عندك؟');
+    if (slots.tables) {
+      const rec = recommendPlan({ tables: slots.tables });
+      const p = rec.plan;
+      parts.push(`ممتاز. مسجل عندي *${slots.tables} طاولة* — أنسب شيء *${p.name}* — *${p.priceMonthly} ₪/شهر* (~*${perTableMonthly(p, slots.tables)} ₪* للطاولة).`);
+      parts.push(`نثبت على *${p.name}*؟`);
+      mockButtons = [
+        { id: 'qr:plan-yes', title: 'نعم ثبتها' },
+        { id: 'qr:edit', title: 'غيّر الباقة' },
+      ];
+    } else {
+      parts.push('ممتاز. كم طاولة تشتغل عندك؟');
+    }
   }
 
   if (parts.length === 0 && askedTables) {
@@ -1385,8 +1432,13 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
   // اعتراض سعري / تردد — معالجة استشارية لا ضغط بيعي
   if (parts.length === 0 && /غالي|غالية|سعر مرتفع|بفكر|افكر|أفكر|أفكّر|بعدين|مش متأكد|متردد|فكر فيها|ميزانية/.test(text)) {
     intent = 'اعتراض_سعري';
-    parts.push(`${vocative}طبيعي تفكر بالسعر — وهذا سؤال الذكي 👍 خلّيني أوضح الصورة: *الباقة الاحترافية* *299 ₪/شهر*، ولو عندك 25 طاولة يعني ~*12 ₪* بس للطاولة — أقل من وجبة وحدة.`);
-    parts.push('وبدون بطاقة للبدء، وتقدر تلغي أو تغيّر الباقة بأي وقت. كم طاولة عندك؟ أحسب لك الرقم الدقيق.');
+    parts.push(`${vocative}طبيعي تفكر بالسعر — وهذا سؤال الذكي 👍 خلّيني أوضح الصورة: *الباقة الاحترافية* *550 ₪/شهر*، ولو عندك 25 طاولة يعني ~*22 ₪* بس للطاولة — أقل من وجبة وحدة أو فنجان قهوة.`);
+    if (slots.tables) {
+      const p = getPlan(slots.plan ?? 'starter');
+      parts.push(`وبدون بطاقة للبدء، وتقدر تلغي أو تغيّر الباقة بأي وقت. مع *${slots.tables} طاولة* على *${p.name}* تطلع ~*${perTableMonthly(p, slots.tables)} ₪* بس للطاولة باليوم فكّة.`);
+    } else {
+      parts.push('وبدون بطاقة للبدء، وتقدر تلغي أو تغيّر الباقة بأي وقت. كم طاولة عندك؟ أحسب لك الرقم الدقيق.');
+    }
   }
 
   // يقارن بنظامه الحالي — سؤال تشخيصي واحد بدل سرد المزايا

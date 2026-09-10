@@ -257,6 +257,20 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
     await appendJsonFile('leads', lead);
     log.tool(`capture_subscription_lead → ${lead.ref} | ${lead.full_name} | ${lead.restaurant_name} (${lead.city}) | ${lead.tables} طاولة | ${lead.preferred_plan}`);
 
+    // تثبيت بيانات العميل في ملف الجلسة والذاكرة الدائمة
+    store.patchProfile(ctx.sessionKey, {
+      full_name: lead.full_name !== 'غير مذكور' ? lead.full_name : undefined,
+      restaurant_name: lead.restaurant_name !== 'غير مذكور' ? lead.restaurant_name : undefined,
+      city: lead.city !== 'غير مذكورة' ? lead.city : undefined,
+      tables: typeof lead.tables === 'number' && lead.tables > 0 ? lead.tables : undefined,
+      preferred_plan: ['starter', 'pro', 'enterprise'].includes(lead.preferred_plan) ? (lead.preferred_plan as PlanId) : undefined,
+    });
+    store.patchLaunch(ctx.sessionKey, {
+      status: 'confirmed',
+      orderRef: lead.ref,
+      confirmedAt: Date.now(),
+    });
+
     const planName =
       MUREEH_PLANS.find((p) => p.id === lead.preferred_plan)?.name ?? lead.preferred_plan;
 

@@ -115,11 +115,11 @@ export class Store {
     return Date.now() - last > config.bot.SESSION_TTL_MINUTES * 60_000;
   }
 
-  /** تدوير الجلسة بعد الخمول: نفرّغ السجل ونحتفظ بالملخص */
+  /** تدوير الجلسة بعد الخمول: نحافظ على سجل الرسائل والذاكرة بدون مسح */
   rotateIfStale(session: Session): boolean {
     if (!this.isStale(session)) return false;
-    const kept = session.messages.slice(-2);
-    session.messages = kept;
+    // لا نحذف سجل الرسائل إطلاقًا — الحفاظ على الذاكرة الكاملة مع العميل
+    // والتحكم في حجم الرسائل المرسلة للنموذج يتم آليًا عبر HISTORY_TURNS
     session.updatedAt = Date.now();
     this.dirty = true;
     return true;

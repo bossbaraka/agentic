@@ -25,4 +25,6 @@ services:
       - key: KEEP_ALIVE_INTERVAL_MINUTES
         value: 10
       - key: WHATSAPP_MANAGER_NUMBER
-        value: "970593498909"
+        value: "972599891559"
+      - key: TELEGRAM_MANAGER_PHONE
+        value: "+972599891559"
