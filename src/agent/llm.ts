@@ -8,6 +8,7 @@ import { store } from '../lib/store.js';
 import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
 import { buildBlueprintText, managerOrderMessage, planIdFromText } from './onboarding.js';
 import { availability, formatAvailabilityText, nextAvailableDays } from './bookings.js';
+import { detectPainPoints } from './intelligence/painPoints.js';
 import {
   clampButtons,
   coherentQuickReplies,
@@ -59,6 +60,17 @@ export interface AgentOutput {
   model: string;
   engine: 'gemini' | 'mock' | 'openai';
   rawText: string;
+  /**
+   * تصنيف صريح لحالة الذكاء التي ولّدت هذا الرد — يُسجَّل ويُقاس ولا يُخفى:
+   *   ai_success      النموذج الأساسي أجاب بنجاح
+   *   ai_degraded     أجاب بديل مُدقَّق (موديل احتياطي/مزوّد ثانٍ) — الجودة قد تختلف قليلًا
+   *   ai_unavailable  سقط النموذج كليًا وأجاب المحرك الحتمي المحلي (من plans.ts) — للطوارئ فقط
+   *   demo_mode       لا مفاتيح مضبوطة والنظام في وضع التجربة — محرك القواعد المقصود
+   * الحقل القديم degraded يبقى متوافقًا (= aiStatus !== 'ai_success').
+   */
+  aiStatus?: 'ai_success' | 'ai_degraded' | 'ai_unavailable' | 'demo_mode';
+  /** هل أجاب موديل بديل عن الأساسي داخل نفس المزوّد؟ */
+  fallbackModel?: boolean;
   /**
    * true عندما تعذّر الوصول لـ Gemini فأجاب البوت من بياناته المحلية الدقيقة
    * (الأسعار والتوصيات من plans.ts) — العميل يحصل على رد مفيد دائمًا،
@@ -728,6 +740,7 @@ async function generateReplyOpenAI(input: AgentInput, started: number): Promise<
     usage: { promptTokens, candidatesTokens },
     model: modelUsed,
     engine: 'openai',
+    fallbackModel: false,
     rawText: finalText,
   });
 }
@@ -735,42 +748,56 @@ async function generateReplyOpenAI(input: AgentInput, started: number): Promise<
 /**
  * توليد الرد — بوابة آمنة لا ترمي خطأ للعميل أبدًا:
  * يوجّه الطلب إلى OpenAI أو Gemini حسب الضبط مع دعم التراجع الذكي.
+ * كل مسار يوسم الرد بـ aiStatus صريح — لا «نجاح» زائف أبدًا.
  */
 export async function generateReply(input: AgentInput): Promise<AgentOutput> {
   const started = Date.now();
 
   if (config.llm.PROVIDER === 'openai') {
     if (!config.openai.API_KEY) {
-      return mockReply(input, started);
+      return mockReply(input, started, config.env.DEMO_MODE ? 'demo_mode' : 'ai_unavailable');
     }
     try {
-      return await generateReplyOpenAI(input, started);
+      const out = await generateReplyOpenAI(input, started);
+      return { ...out, aiStatus: 'ai_success', degraded: false };
     } catch (err) {
       log.error(`فشل OpenAI: ${(err as Error).message}`);
       if (config.gemini.API_KEY) {
         try {
           log.warn('↩️ التبديل التلقائي إلى Gemini كبديل لـ OpenAI...');
-          return await generateReplyInner(input, started);
+          const out = await generateReplyInner(input, started);
+          return {
+            ...out,
+            aiStatus: out.aiStatus === 'ai_degraded' ? 'ai_degraded' : 'ai_degraded',
+            degraded: out.aiStatus === 'ai_unavailable',
+            degradedReason: out.degradedReason ?? `OpenAI error: ${(err as Error).message} → answered by Gemini`,
+          };
         } catch (geminiErr) {
           log.error(`فشل Gemini الاحتياطي أيضًا: ${(geminiErr as Error).message}`);
         }
       }
-      const fb = mockReply(input, started);
+      const fb = mockReply(input, started, 'ai_unavailable');
       return { ...fb, degraded: true, degradedReason: `OpenAI error: ${(err as Error).message}` };
     }
   }
 
   if (!config.gemini.API_KEY) {
-    return mockReply(input, started);
+    return mockReply(input, started, config.env.DEMO_MODE ? 'demo_mode' : 'ai_unavailable');
   }
 
   try {
-    return await generateReplyInner(input, started);
+    const out = await generateReplyInner(input, started);
+    if (out.aiStatus === 'ai_unavailable') return out; // حلقة الأدوات فشلت كليًا داخل المزود نفسه
+    return {
+      ...out,
+      aiStatus: out.fallbackModel ? 'ai_degraded' : 'ai_success',
+      degraded: false,
+    };
   } catch (err) {
     const c = classifyGeminiError(err);
     log.error(`فشل Gemini نهائيًا (${c.kind}): ${(err as Error).message}`);
     log.warn(`↩️ الرد الاحتياطي المحلي مفعّل — ${c.hint}`);
-    const fb = mockReply(input, started);
+    const fb = mockReply(input, started, 'ai_unavailable');
     return { ...fb, degraded: true, degradedReason: `${c.kind}: ${c.hint}` };
   }
 }
@@ -780,7 +807,7 @@ export async function generateReply(input: AgentInput): Promise<AgentOutput> {
  * يستخدم نفس بيانات الباقات الرسمية (plans.ts) فلا تخمين ولا أسعار خاطئة.
  */
 export function offlineFallbackReply(input: AgentInput, reason: string): AgentOutput {
-  const fb = mockReply(input, Date.now());
+  const fb = mockReply(input, Date.now(), 'ai_unavailable');
   return { ...fb, degraded: true, degradedReason: reason };
 }
 
@@ -949,6 +976,7 @@ async function generateReplyInner(input: AgentInput, started: number): Promise<A
     usage: { promptTokens, candidatesTokens },
     model: modelUsed,
     engine: 'gemini',
+    fallbackModel: modelUsed !== (buildModelChain()[0] ?? config.gemini.MODEL),
     rawText: finalText,
   });
 }
@@ -1104,13 +1132,17 @@ function collectSlots(turns: Turn[], sessionKey: string): { name?: string; resta
  * يعمل بدون GEMINI_API_KEY حتى تقدر تجرب المسار الكامل.
  * الردود قواعد بسيطة — لكن بنفس نبرة الإنسان المتحمّس، لا سكربت جاف.
  */
-function mockReply(input: AgentInput, _started: number): AgentOutput {
+function mockReply(input: AgentInput, _started: number, aiStatus: 'ai_unavailable' | 'demo_mode' = 'ai_unavailable'): AgentOutput {
+  const custState = store.get(input.toolContext.sessionKey).customer;
+  const hasKnownPain = Boolean(custState?.painPoints?.length);
   const lastUser = [...input.turns].reverse().find((t) => t.role === 'user');
   const raw = lastUser?.text ?? '';
   const text = raw.toLowerCase();
   const hasMedia = Boolean(lastUser?.media?.length);
   const lastModelText = [...input.turns].reverse().find((t) => t.role === 'model')?.text ?? '';
   const slots = collectSlots(input.turns, input.toolContext.sessionKey);
+  /** اعتراض صريح في نص العميل — يسبق أي مسار جمع بيانات (لا «وصلت التفاصيل» على «غالي») */
+  const objectionEarly = /(?:غالي|غاليه|مرتفع|مكلف|بفكر|افكر|بعدين|لاحقا|مش متاكد|متردد|ميزانيه|اكتر من ميزانيتي|ما في فايده|مو مقتنع|معقد|معقده|صعب عليا|ما بثق|مو واثق|خليني افكر)/i.test(text);
   const name = slots.name || nameFromPrompt(input.systemPrompt);
   const vocative = name ? `${name}، ` : '';
   const askedActivation = /أجهّز لك التفعيل|أجهز لك التفعيل|أجهز التفعيل|تبيني أجه|خلّينا نجه|شو اسمك|أرسل لي: اسمك/.test(lastModelText);
@@ -1199,6 +1231,14 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
       parts.push(`${g}${name ? ` ${name}` : ''} 👋 أنا ${config.bot.BOT_NAME} — منيو QR، شاشة مطبخ حية، وكاشير من الرمز على الطاولة.`);
       parts.push('كم طاولة تشتغل عندك؟ أحسب لك الباقة اللي تفرق معك فعلًا.');
     }
+  } else if (objectionEarly && !askedConfirm) {
+    // معالجة اعتراض استشارية — أولوية على مسارات الجمع: لا «وصلت التفاصيل» على «غالي» أبدًا
+    intent = 'اعتراض_سعري';
+    const rec = recommendPlan({ tables: slots.tables });
+    const p = rec.plan;
+    const perTable = slots.tables ? perTableMonthly(p, slots.tables) : undefined;
+    parts.push(`${vocative}مفهوم تمامًا، والسعر يُحسب 👍 خلّيني أوضح الصورة بالأرقام الرسمية: *${p.name}* *${p.priceMonthly} ₪/شهر*${perTable ? ` — يعني ~*${perTable} ₪* بس للطاولة` : ''}.`);
+    parts.push(`وبدون بطاقة للبدء، وترقية أو إلغاء بأي وقت. ولو احتياجك حاليًا المنيو الرقمي والطلبات فقط، *الباقة الأساسية* *300 ₪/شهر* تكفي وتزيد لاحقًا بضغطة.`);
   } else if (askedName && raw.trim().split(/\s+/).length <= 4 && !/سعر|باقة/.test(text)) {
     intent = 'طلب_تفعيل';
     parts.push(`تسلم${name ? ' ' + name : ''}. واسم المطعم؟`);
@@ -1222,7 +1262,12 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
       const p = rec.plan;
       const perTable = perTableMonthly(p, tables);
       parts.push(`لـ*${tables} طاولة* أنصحك بـ*${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' (الأكثر طلبًا)' : ''}، يعني ~*${perTable} ₪* بس للطاولة الواحدة.`);
-      parts.push(`${rec.reason}، والدفع السنوي يوفّر عليك *${p.yearlySavings} ₪*. تبيني أجهّز لك التفعيل؟`);
+      // اكتشاف الألم قبل الدفع للبيع: بلا ألم معروف، السؤال التالي هو التشخيص لا الإغلاق
+      if (hasKnownPain) {
+        parts.push(`${rec.reason}، والدفع السنوي يوفّر عليك *${p.yearlySavings} ₪*. تبيني أجهّز لك التفعيل؟`);
+      } else {
+        parts.push(`${rec.reason}، والدفع السنوي يوفّر عليك *${p.yearlySavings} ₪*. وأكثر شيء يسبب لك مشكلة حاليًا: تأخير النادل، ضياع أو اختلاط الطلبات، ولا الحسابات اليدوية آخر اليوم؟`);
+      }
     }
   }
 
@@ -1320,11 +1365,16 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
       const rec = recommendPlan({ tables: tCount });
       const p = rec.plan;
       parts.push(`لـ*${tCount} طاولة* أنسب شيء *${p.name}* — *${p.priceMonthly} ₪/شهر* (~*${perTableMonthly(p, tCount)} ₪* للطاولة).`);
-      parts.push(`نثبت على *${p.name}*؟`);
-      mockButtons = [
-        { id: 'qr:plan-yes', title: 'نعم ثبتها' },
-        { id: 'qr:edit', title: 'غيّر الباقة' },
-      ];
+      // بلا ألم معروف: التشخيص قبل التثبيت — لا إغلاق مبكر على من لم يتألم بعد
+      if (hasKnownPain) {
+        parts.push(`نثبت على *${p.name}*؟`);
+        mockButtons = [
+          { id: 'qr:plan-yes', title: 'نعم ثبتها' },
+          { id: 'qr:edit', title: 'غيّر الباقة' },
+        ];
+      } else {
+        parts.push('وأكثر شيء يسبب لك مشكلة حاليًا: تأخير النادل، ضياع أو اختلاط الطلبات، ولا الحسابات اليدوية آخر اليوم؟');
+      }
     } else {
       intent = 'تجهيز_إطلاق';
       parts.push('اكتب لي عدد الطاولات رقمًا — مثلًا: 25');
@@ -1358,8 +1408,21 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
         { id: 'qr:edit', title: 'تعديل' },
       ];
     } else {
-      intent = 'استفسار_أسعار';
-      parts.push(`ولا يهمك 👍 ثلاث باقات:\n${planList()}\n\nأي وحدة نثبت عليها؟ اكتب اسمها.`);
+      // لم يؤكد — إن كان رده وصف ألم/مشكلة فنعالجه بدل إعادة سرد القائمة
+      const pains = detectPainPoints(raw);
+      if (pains.length > 0) {
+        intent = 'مقارنة_وضع_حالي';
+        const chosenPlan = getPlan((slots.plan ?? planIdFromText(lastModelText) ?? 'pro') as PlanId);
+        parts.push('واضح، وهذي بالضبط شغل النظام 👌 طلبك يوصل المطبخ لحظة إدخاله والطلبات ما تضيع ولا تنخلط.');
+        parts.push(`نعيد السؤال: نثبت على *${chosenPlan.name}* ونجهز نسختك؟ (أو اكتبلي تعديلك)`);
+        mockButtons = [
+          { id: 'qr:plan-yes', title: 'نعم ثبتها' },
+          { id: 'qr:edit', title: 'تعديل' },
+        ];
+      } else {
+        intent = 'استفسار_أسعار';
+        parts.push(`ولا يهمك 👍 ثلاث باقات:\n${planList()}\n\nأي وحدة نثبت عليها؟ اكتب اسمها.`);
+      }
     }
   }
 
@@ -1495,6 +1558,25 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     parts.push('خبّرني: هذي منيو، شاشة مطبخ، ولا شيء ثاني؟ وأنا أربطها لك بالحل المناسب.');
   }
 
+  // ── رسالة ألم صريحة بلا فرع أعلىها: اعتراف + ربط الألم بالحل، بلا إغلاق مبكر ──
+  if (parts.length === 0) {
+    const painsNow = detectPainPoints(raw);
+    if (painsNow.length > 0) {
+      intent = 'مقارنة_وضع_حالي';
+      const solutionNames: Record<string, string> = {
+        slow_waiter: 'زر استدعاء النادل يوصل الطلب للطاولة مباشرة',
+        lost_orders: 'الطلب يسير من المنيو للمطبخ لحظة إدخاله وما يضيع ولا ينخلط',
+        kitchen_delays: 'شاشة مطبخ حية ترتّب الطلبات بتنبيهات فورية',
+        paper_menu: 'منيو رقمي يتعدل بدقائق بلا طباعة',
+        manual_accounting: 'تقارير وتسويات تلقائية آخر اليوم',
+        order_errors: 'الطلب ينتقل كما هو — بلا إعادة كتابة ولا أخطاء',
+      };
+      const sol = solutionNames[painsNow[0]!.pain] ?? 'المنيو الرقمي والطلب المباشر من الطاولة';
+      parts.push(`واضح، وهذا بالضبط اللي بنحله: ${sol}.`);
+      parts.push('وش أكثر شيء ثاني يضايقك اليوميًا — والتوقيت: المشكلة وقت الذروة بس ولا على طول؟');
+    }
+  }
+
   if (parts.length === 0) {
     intent = 'عام';
     parts.push(`${vocative}وصلتني 👌 أقدر أشرح الباقات، أحسب لك الأنسب حسب الطاولات، وأجهّز التفعيل، وأتابع أي عطل فني.`);
@@ -1520,6 +1602,8 @@ function mockReply(input: AgentInput, _started: number): AgentOutput {
     usage: { promptTokens: 0, candidatesTokens: 0 },
     model: 'mock-engine',
     engine: 'mock',
+    aiStatus,
+    degraded: aiStatus === 'ai_unavailable',
     rawText: JSON.stringify({ reply_parts: parts, handoff, intent }),
   });
 }

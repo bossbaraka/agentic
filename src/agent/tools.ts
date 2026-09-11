@@ -295,9 +295,6 @@ const HANDLERS: Record<string, ToolHandler> = {
       }
       lines.push('');
     }
-    lines.push(lang === 'en'
-      ? 'Which service would you like details about?'
-      : 'أي خدمة تحب أشرح لك تفاصيلها وأسعارها؟');
     log.tool('get_services → كتالوج ديناميكي');
     return { ok: true, data: { groups: data }, userMessage: lines.join('\n').trim() };
   },
@@ -322,18 +319,28 @@ const HANDLERS: Record<string, ToolHandler> = {
     const id = ['starter', 'pro', 'enterprise'].includes(args.plan_id) ? args.plan_id : 'pro';
     const billing = args.billing === 'yearly' ? 'yearly' : 'monthly';
     const plan = getPlan(id);
-    const lines = [
-      `*${plan.name}*${plan.mostPopular ? ' ← الأكثر طلبًا' : ''} — ${plan.tagline}`,
-      billing === 'monthly'
-        ? `السعر: *${plan.priceMonthly} ₪/شهر* — ثابت مهما زادت طلباتك، بدون رسوم مخفية`
-        : `السعر السنوي: *${plan.priceYearly} ₪* دفعة واحدة (≈ ${plan.priceYearlyPerMonth} ₪/شهر)`,
-    ];
-    if (billing === 'monthly') lines.push(`الدفع السنوي: ${plan.priceYearlyPerMonth} ₪/شهر — توفير *${plan.yearlySavings} ₪* (~17%)`);
-    lines.push('وش تحصل عليه:');
-    for (const f of plan.features) lines.push(`• ${f}`);
-    lines.push('تبيني أجهّز لك التفعيل على هذي الباقة؟');
     log.tool(`get_plan_details → ${id} (${billing})`);
-    return { ok: true, data: { plan: plan.id, billing, price: plan[billing === 'monthly' ? 'priceMonthly' : 'priceYearly'] }, userMessage: lines.join('\n') };
+    // بيانات منظمة كاملة — الصياغة للنموذج (الأداة لا تبيع ولا تطرح أسئلة)
+    return {
+      ok: true,
+      data: {
+        plan: plan.id,
+        name: plan.name,
+        billing,
+        price: billing === 'monthly' ? plan.priceMonthly : plan.priceYearly,
+        currency: 'ILS',
+        priceMonthly: plan.priceMonthly,
+        priceYearly: plan.priceYearly,
+        priceYearlyPerMonth: plan.priceYearlyPerMonth,
+        yearlySavings: plan.yearlySavings,
+        mostPopular: Boolean(plan.mostPopular),
+        features: plan.features,
+      },
+      userMessage:
+        `${plan.name}${plan.mostPopular ? ' (الأكثر طلبًا)' : ''}: ${plan.priceMonthly} ₪/شهر — ` +
+        `أو سنويًا ${plan.priceYearly} ₪ (${plan.priceYearlyPerMonth} ₪/شهر مكافئ، توفير ${plan.yearlySavings} ₪). ` +
+        `المزايا: ${plan.features.join(' • ')}`,
+    };
   },
 
   recommend_plan(args) {
@@ -341,27 +348,43 @@ const HANDLERS: Record<string, ToolHandler> = {
     const needs = Array.isArray(args.needs) ? args.needs.map(String) : [];
     const rec = recommendPlan({ tables, needs });
     const p = rec.plan;
-    const perTable = tables ? `، يعني ~*${perTableMonthly(p, tables)} ₪* للطاولة الواحدة` : '';
+    const perTable = tables ? perTableMonthly(p, tables) : undefined;
     log.tool(`recommend_plan → ${p.id} (tables=${tables ?? '?'})`);
     return {
       ok: true,
-      data: { recommended: p.id, priceMonthly: p.priceMonthly, priceYearly: p.priceYearly, reason: rec.reason },
-      userMessage: [
-        `أنسب باقة لحالتك: *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}${perTable}`,
-        rec.reason + '.',
-        `ولو سنوي: ${p.priceYearlyPerMonth} ₪/شهر — توفير *${p.yearlySavings} ₪*، وبدون بطاقة للبدء.`,
-        'تبيني أجهّز لك التفعيل؟',
-      ].join('\n'),
+      data: {
+        recommended: p.id,
+        planName: p.name,
+        priceMonthly: p.priceMonthly,
+        priceYearly: p.priceYearly,
+        priceYearlyPerMonth: p.priceYearlyPerMonth,
+        yearlySavings: p.yearlySavings,
+        perTableMonthly: perTable,
+        reason: rec.reason,
+        features: p.features,
+      },
+      userMessage:
+        `التوصية الحتمية: ${p.name} — ${p.priceMonthly} ₪/شهر` +
+        (perTable ? ` (~${perTable} ₪ للطاولة عند ${tables} طاولة)` : '') +
+        `. السبب: ${rec.reason}. السنوي: ${p.priceYearlyPerMonth} ₪/شهر (توفير ${p.yearlySavings} ₪).`,
     };
   },
 
   get_menu() {
-    const lines = ['*باقاتنا الثلاث* — كلها بدون عقود وبدون رسوم مخفية:'];
-    for (const p of MUREEH_PLANS) {
-      lines.push(`• *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`);
-    }
-    lines.push('\nوعندنا خدمات رقمية ثانية (مواقع، وكلاء ذكاء، حجوزات...) — اطلب قائمة الخدمات أعرضها لك.');
-    return { ok: true, data: { plans: MUREEH_PLANS.map((p) => ({ id: p.id, priceMonthly: p.priceMonthly })) }, userMessage: lines.join('\n') };
+    return {
+      ok: true,
+      data: {
+        plans: MUREEH_PLANS.map((p) => ({
+          id: p.id, name: p.name, priceMonthly: p.priceMonthly,
+          priceYearly: p.priceYearly, priceYearlyPerMonth: p.priceYearlyPerMonth,
+          yearlySavings: p.yearlySavings, mostPopular: Boolean(p.mostPopular),
+          tagline: p.tagline, features: p.features,
+        })),
+      },
+      userMessage: MUREEH_PLANS.map((p) =>
+        `${p.name}${p.mostPopular ? ' (الأكثر طلبًا)' : ''}: ${p.priceMonthly} ₪/شهر — ${p.tagline}`,
+      ).join('\n'),
+    };
   },
 
   get_restaurant_info(_args, ctx) {
@@ -517,7 +540,6 @@ const HANDLERS: Record<string, ToolHandler> = {
     }
     const lines = ['أقرب أيام متاحة للحجز:'];
     for (const d of next) lines.push(`• ${d.date} (${d.dayName}): ${d.slots.join('، ')}`);
-    lines.push('أي تاريخ ووقت يناسبك؟');
     return { ok: true, data: { next }, userMessage: lines.join('\n') };
   },
 
@@ -587,8 +609,8 @@ const HANDLERS: Record<string, ToolHandler> = {
       log.tool(`cancel_booking → ${cancelled.ref}`);
       return {
         ok: true,
-        data: { ref: cancelled.ref, status: cancelled.status },
-        userMessage: `تم إلغاء حجزك *${cancelled.ref}* (${cancelled.slot_date} — ${cancelled.slot_time}). حاب نحجز موعد بديل؟ أنا جاهز.`,
+        data: { ref: cancelled.ref, status: cancelled.status, date: cancelled.slot_date, time: cancelled.slot_time },
+        userMessage: `تم إلغاء الحجز *${cancelled.ref}* (${cancelled.slot_date} — ${cancelled.slot_time}).`,
       };
     } catch (err) {
       return toolError(err, 'تعذّر إلغاء الحجز');

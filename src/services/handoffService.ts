@@ -7,16 +7,41 @@ import { setConversationState, ensureConversation } from '../db/repos/conversati
 import { audit, recordMetric } from '../db/repos/system.js';
 import { notifications } from './notificationService.js';
 
+export interface HandoffMeta {
+  /** مرحلة العميل في رحلة البيع */
+  stage?: string;
+  /** نقاط الجودة 0–100 */
+  leadScore?: number;
+  /** باقة معروضة/مختارة */
+  plan?: string;
+  /** عدد طاولات المطعم */
+  tables?: number;
+  /** اسم المطعم */
+  restaurant?: string;
+  /** نوع الاعتراض القائم إن وجد */
+  objection?: string;
+}
+
 export const handoffService = {
-  /** طلب عميل (أو الـ AI) التحويل لبشري */
-  request(input: { contactKey: string; name?: string; reason?: string; lastMessage?: string; summary?: string }): void {
+  /** طلب عميل (أو الـ AI) التحويل لبشري — مع بيانات تسليم مفيدة للموظف */
+  request(input: { contactKey: string; name?: string; reason?: string; lastMessage?: string; summary?: string; meta?: HandoffMeta }): void {
     ensureConversation(input.contactKey, input.name ?? '');
     setConversationState(input.contactKey, 'human', { reason: input.reason ?? 'طلب العميل موظفًا بشريًا' });
+
+    const m = input.meta;
+    const metaLines: string[] = [];
+    if (m?.stage) metaLines.push(`المرحلة: ${m.stage}`);
+    if (m?.leadScore !== undefined) metaLines.push(`نقاط الجودة: ${m.leadScore}/100`);
+    if (m?.restaurant) metaLines.push(`المطعم: ${m.restaurant}`);
+    if (m?.tables) metaLines.push(`الطاولات: ${m.tables}`);
+    if (m?.plan) metaLines.push(`الباقة: ${m.plan}`);
+    if (m?.objection) metaLines.push(`اعتراض قائم: ${m.objection}`);
 
     const note =
       `🙋 *تحويل محادثة لبشري*\n` +
       `العميل: ${input.name ?? input.contactKey} (${input.contactKey})\n` +
       (input.reason ? `السبب: ${input.reason}\n` : '') +
+      (metaLines.length ? `سياق العميل: ${metaLines.join(' · ')}\n` : '') +
       (input.summary ? `ملخص: ${input.summary.slice(0, 500)}\n` : '') +
       (input.lastMessage ? `آخر رسالة: ${input.lastMessage.slice(0, 400)}` : '');
 
@@ -25,8 +50,9 @@ export const handoffService = {
       name: input.name ?? input.contactKey,
       lastMessage: input.lastMessage ?? '',
       reason: input.reason,
+      ...(m ?? {}),
     });
-    audit({ actorType: 'customer', actorId: input.contactKey, action: 'handoff.request', entity: 'conversation', entityId: input.contactKey, meta: { reason: input.reason ?? null } });
+    audit({ actorType: 'customer', actorId: input.contactKey, action: 'handoff.request', entity: 'conversation', entityId: input.contactKey, meta: { reason: input.reason ?? null, ...(m ?? {}) } });
     recordMetric('handoff', { refKey: input.contactKey });
   },
 

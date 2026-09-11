@@ -293,4 +293,18 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 `,
   },
+  {
+    version: 2,
+    name: 'customer_agent_state',
+    sql: `
+-- حالة الوكيل الدائمة لكل عميل (مرحلة البيع، نقاط الجودة، آخر نية،
+-- والحالة الكاملة JSON: ألم، اعتراضات، آخر عرض...). أعمدة إضافية فقط —
+-- لا تكسر أي مستهلك قائم، والقيم كلها nullable.
+ALTER TABLE customers ADD COLUMN sales_stage TEXT;
+ALTER TABLE customers ADD COLUMN lead_score INTEGER;
+ALTER TABLE customers ADD COLUMN last_intent TEXT;
+ALTER TABLE customers ADD COLUMN agent_state TEXT;
+CREATE INDEX IF NOT EXISTS idx_customers_lead_score ON customers(lead_score);
+`,
+  },
 ];

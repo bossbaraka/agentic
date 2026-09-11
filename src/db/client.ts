@@ -99,18 +99,21 @@ export function migrationVersion(): number {
   return Number(row?.v ?? 0);
 }
 
+/** قيم مسموح تمريرها إلى node:sqlite (يطابق SQLInputValue) */
+export type SqlParam = null | number | bigint | string | NodeJS.ArrayBufferView;
+
 // ───────────────────────── مساعدات الاستعلام ─────────────────────────
 
 export function all<T = Row>(sql: string, params: unknown[] = []): T[] {
-  return db().prepare(sql).all(...params) as T[];
+  return db().prepare(sql).all(...(params as SqlParam[])) as T[];
 }
 
 export function get<T = Row>(sql: string, params: unknown[] = []): T | undefined {
-  return db().prepare(sql).get(...params) as T | undefined;
+  return db().prepare(sql).get(...(params as SqlParam[])) as T | undefined;
 }
 
 export function run(sql: string, params: unknown[] = []): { changes: number; lastInsertRowid: number } {
-  const r = db().prepare(sql).run(...params);
+  const r = db().prepare(sql).run(...(params as SqlParam[]));
   return { changes: Number(r.changes), lastInsertRowid: Number(r.lastInsertRowid) };
 }
 

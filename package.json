@@ -17,7 +17,8 @@
     "test": "tsx --test tests/*.test.ts",
     "test:flow": "tsx scripts/test-flow.ts",
     "test:smoke": "tsx scripts/smoke-menu.ts",
-    "prestart": "node -e \"import('fs').then(fs => fs.mkdirSync('data',{recursive:true}))\""
+    "prestart": "node -e \"import('fs').then(fs => fs.mkdirSync('data',{recursive:true}))\"",
+    "eval": "tsx scripts/eval-conversations.ts"
   },
   "dependencies": {
     "@fastify/static": "^8.0.0",

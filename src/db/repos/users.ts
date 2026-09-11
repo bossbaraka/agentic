@@ -119,6 +119,49 @@ export function listCustomers(limit = 50): (CustomerRow & { contact_key: string;
     ORDER BY c.updated_at DESC LIMIT ?`, [limit]);
 }
 
+// ───────────────────────── حالة الوكيل الدائمة (Migration v2) ─────────────────────────
+
+export interface AgentStatePatch {
+  salesStage?: string;
+  leadScore?: number;
+  lastIntent?: string;
+  /** الحالة الكاملة JSON (ألم، اعتراضات، آخر عرض، هدف محادثة...) */
+  agentStateJson?: string;
+}
+
+/** مطابقة حالة الوكيل في قاعدة البيانات — دفاعية وتُستدعى بعد كل تحليل */
+export function patchAgentState(contactKey: string, patch: AgentStatePatch): void {
+  const { customer } = ensureCustomer(contactKey);
+  run(
+    `UPDATE customers SET
+       sales_stage = COALESCE(?, sales_stage),
+       lead_score = COALESCE(?, lead_score),
+       last_intent = COALESCE(?, last_intent),
+       agent_state = COALESCE(?, agent_state),
+       updated_at = ?
+     WHERE id = ?`,
+    [
+      patch.salesStage ?? null, patch.leadScore ?? null, patch.lastIntent ?? null,
+      patch.agentStateJson ?? null, Date.now(), customer.id,
+    ],
+  );
+}
+
+export function getAgentState(contactKey: string): { salesStage?: string; leadScore?: number; lastIntent?: string; agentStateJson?: string } | undefined {
+  const { customer } = ensureCustomer(contactKey);
+  const row = get<{ sales_stage?: string; lead_score?: number; last_intent?: string; agent_state?: string }>(
+    'SELECT sales_stage, lead_score, last_intent, agent_state FROM customers WHERE id = ?',
+    [customer.id],
+  );
+  if (!row) return undefined;
+  return {
+    salesStage: row.sales_stage ?? undefined,
+    leadScore: row.lead_score ?? undefined,
+    lastIntent: row.last_intent ?? undefined,
+    agentStateJson: row.agent_state ?? undefined,
+  };
+}
+
 // ───────────────────────── المشرفون (RBAC) ─────────────────────────
 
 export function getAdminByTelegramId(telegramId: string): AdminRow | undefined {
