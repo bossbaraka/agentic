@@ -191,17 +191,28 @@
     try{
       const r=await fetch('api/sessions',{credentials:'same-origin'});
       const d=await r.json();
-      sessions=d.sessions||[]; renderStats(d.stats); renderList();
+      sessions=d.sessions||[]; renderStats(d.stats,d.db); renderList();
     }catch(e){ /* الخادم قد لا يكون جاهزًا بعد */ }
   }
 
-  function renderStats(st){
+  function renderStats(st,db){
     if(!st)return;
     const cards=[
       ['المحادثات',st.sessions],['واردة',st.inbound],['صادرة',st.outbound],
       ['تحويلات',st.handoffs],['زمن الرد',st.avgLatencyMs?(st.avgLatencyMs/1000).toFixed(1)+'s':'—'],
       ['توكنز',((st.promptTokens+st.candidatesTokens)/1000).toFixed(1)+'k'],['أخطاء',st.errors]
     ];
+    if(db){
+      const bk=db.bookings||{};
+      cards.push(
+        ['مستخدمون (DB)',db.users??0],
+        ['حجوزات مؤكدة',bk.CONFIRMED??0],
+        ['حجوزات مكتملة',bk.COMPLETED??0],
+        ['طلبات (DB)',db.orders??0],
+        ['تذاكر مفتوحة',db.ticketsOpen??0],
+        ['إشعارات عالقة',db.notificationsPending??0],
+      );
+    }
     $('#stats').innerHTML=cards.map(([l,v])=>`<div class="stat"><b>${v}</b><span>${l}</span></div>`).join('');
     const p=$('#enginePill');
     p.textContent = st.demoMode ? '🧪 وضع التجربة' : ('✨ '+st.model);

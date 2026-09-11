@@ -1,44 +1,23 @@
 /**
- * نظام الحجوزات — مواعيد التفعيل مع فريق مُريح.
+ * منطق الحجوزات النقي (Domain Logic) — مواعيد تفعيل فريق مُريح.
  *
- * في سياق منصة مُريح (B2B) يكون «الحجز» = موعد تفعيل اشتراك العميل مع الفريق.
- * كل الأرقام والمواعيد هنا حتمية (deterministic) ومن مصدر إعدادات واحد
- * (config.booking) — البوت لا يخترع أي موعد أو ساعة عمل:
- *   - التوفر يُحسب من أيام/ساعات العمل + إشغال المواعيد المسجلة.
- *   - لا يوجد موعد «مؤكد» إلا بعد نجاح createBooking.
+ * كل الأرقام والمواعيد حتمية من مصدر إعدادات واحد (config.booking):
+ *   - التوفر يُحسب من أيام/ساعات العمل + إشغال المواعيد (تُمرّر له كمدخل).
+ *   - لا تخزين هنا إطلاقًا: الإدخال/الإخراج عبر src/db/repos/bookings.ts.
+ *   - منع الحجز المزدوج يُفرض أيضًا بقيد UNIQUE في قاعدة البيانات.
  *
- * التخزين: ملف JSON ذرّي في data/bookings.json (نفس نمط بقية المخازن).
+ * الحالات: PENDING → CONFIRMED → COMPLETED
+ *                                  └→ NO_SHOW
+ *               أي حالة نشطة ─→ CANCELLED
  */
-import fs from 'node:fs';
-import path from 'node:path';
 import { config } from '../config.js';
-import { log, uid } from '../lib/utils.js';
 import { getPlan, type PlanId } from './plans.js';
 
-// ─────────────────────────────── الأنواع ───────────────────────────────
+export type BookingStatus = 'PENDING' | 'CONFIRMED' | 'COMPLETED' | 'CANCELLED' | 'NO_SHOW';
 
-export type BookingStatus = 'confirmed' | 'cancelled' | 'completed';
-
-export interface Booking {
-  /** معرّف الحجز BKG-XXXXXX */
-  ref: string;
-  /** الخدمة المحجوزة = الباقة (starter | pro | enterprise) */
-  service: PlanId;
-  /** التاريخ بصيغة YYYY-MM-DD */
-  date: string;
-  /** الوقت بصيغة HH:MM */
-  time: string;
-  fullName?: string;
-  restaurantName?: string;
-  city?: string;
-  tables?: number;
-  /** قناة/معرّف العميل (sessionKey) */
-  contact: string;
-  notes?: string;
-  status: BookingStatus;
-  createdAt: number;
-  updatedAt: number;
-  cancelledReason?: string;
+export interface SlotOccupancy {
+  slot_date: string;
+  slot_time: string;
 }
 
 export interface AvailabilityInfo {
@@ -54,6 +33,7 @@ export interface AvailabilityInfo {
 }
 
 export const DAY_NAMES = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+export const DAY_NAMES_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // ─────────────────────────────── الإعدادات ───────────────────────────────
 
@@ -73,33 +53,34 @@ export function availability(): AvailabilityInfo {
   };
 }
 
-/** وصف عربي لساعات العمل — يُحقن في الـ prompt وفي get_restaurant_info */
-export function formatAvailabilityText(): string {
+export function formatAvailabilityText(lang: 'ar' | 'en' = 'ar'): string {
   const a = availability();
-  const days = a.workingDayNames.join('، ');
-  return `${days} من ${pad2(a.openHour)}:00 إلى ${pad2(a.closeHour)}:00 (توقيت ${a.timezone === 'Asia/Jerusalem' ? 'القدس' : a.timezone}) — مدة الموعد ${a.slotMinutes} دقيقة.`;
+  const tzLabel = a.timezone === 'Asia/Jerusalem' ? (lang === 'en' ? 'Jerusalem' : 'القدس') : a.timezone;
+  if (lang === 'en') {
+    const days = workingDayNamesEn(a.workingDays).join(', ');
+    return `${days}, ${pad2(a.openHour)}:00–${pad2(a.closeHour)}:00 (${tzLabel} time) — each appointment is ${a.slotMinutes} minutes.`;
+  }
+  return `${a.workingDayNames.join('، ')} من ${pad2(a.openHour)}:00 إلى ${pad2(a.closeHour)}:00 (توقيت ${tzLabel}) — مدة الموعد ${a.slotMinutes} دقيقة.`;
+}
+
+function workingDayNamesEn(days: number[]): string[] {
+  return days.map((d) => DAY_NAMES_EN[d]!);
 }
 
 // ─────────────────────────────── أدوات التاريخ ───────────────────────────────
 
 const pad2 = (n: number): string => String(n).padStart(2, '0');
 
-/** تاريخ اليوم بصيغة YYYY-MM-DD حسب منطقة النشاط الزمنية */
 export function todayISO(): string {
   try {
-    const fmt = new Intl.DateTimeFormat('en-CA', {
-      timeZone: config.booking.TIMEZONE,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-    return fmt.format(new Date());
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: config.booking.TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
   } catch {
     return new Date().toISOString().slice(0, 10);
   }
 }
 
-/** تاريخ أقصى مدى مسموح للحجز (اليوم + advanceDays) */
 export function maxISO(): string {
   const t = parseDateParts(todayISO());
   if (!t) return todayISO();
@@ -107,14 +88,10 @@ export function maxISO(): string {
   return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
 }
 
-/** الوقت الآن HH:MM حسب المنطقة الزمنية */
 export function nowHHMM(): string {
   try {
     const parts = new Intl.DateTimeFormat('en-GB', {
-      timeZone: config.booking.TIMEZONE,
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
+      timeZone: config.booking.TIMEZONE, hour: '2-digit', minute: '2-digit', hour12: false,
     }).formatToParts(new Date());
     const h = parts.find((p) => p.type === 'hour')?.value ?? '00';
     const m = parts.find((p) => p.type === 'minute')?.value ?? '00';
@@ -128,7 +105,7 @@ export function nowHHMM(): string {
 interface DateParts { year: number; month: number; day: number }
 
 function parseDateParts(dateStr: string): DateParts | null {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec((dateStr ?? '').trim());
   if (!m) return null;
   const year = Number(m[1]);
   const month = Number(m[2]);
@@ -139,14 +116,16 @@ function parseDateParts(dateStr: string): DateParts | null {
   return { year, month, day };
 }
 
-/** يوم الأسبوع لتاريخ معين (0=الأحد … 6=السبت) — دون الاعتماد على منطقة الجهاز */
+export function isValidDate(dateStr: string): boolean {
+  return parseDateParts(dateStr) !== null;
+}
+
 export function weekdayOf(dateStr: string): number | null {
   const p = parseDateParts(dateStr);
   if (!p) return null;
   return new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay();
 }
 
-/** قائمة الفتحات الزمنية المتاحة في يوم عمل (كل الأوقات، دون اعتبار الإشغال) */
 export function slotsForDate(dateStr: string): string[] {
   const a = availability();
   const start = a.openHour * 60;
@@ -158,98 +137,37 @@ export function slotsForDate(dateStr: string): string[] {
   return slots;
 }
 
-// ─────────────────────────────── المخزن ───────────────────────────────
+/**
+ * epoch ms لموعد محلي بمنطقة النشاط (DST-aware):
+ * نحسب إزاحة المنطقة في ذلك اليوم/الساعة عبر Intl ثم نرجع اللحظة الحقيقية.
+ */
+export function slotEpochMs(dateStr: string, time: string): number | null {
+  const p = parseDateParts(dateStr);
+  const tm = /^(\d{1,2}):(\d{2})$/.exec((time ?? '').trim());
+  if (!p || !tm) return null;
+  const hour = Number(tm[1]);
+  const minute = Number(tm[2]);
+  if (hour > 23 || minute > 59) return null;
 
-const BOOKINGS_FILE = () => path.join(config.paths.DATA_DIR, 'bookings.json');
-
-class BookingStore {
-  private items: Booking[] | null = null;
-
-  private load(): Booking[] {
-    if (this.items) return this.items;
-    this.items = [];
-    try {
-      if (fs.existsSync(BOOKINGS_FILE())) {
-        const raw = JSON.parse(fs.readFileSync(BOOKINGS_FILE(), 'utf8')) as Booking[];
-        if (Array.isArray(raw)) this.items = raw;
-      }
-    } catch (err) {
-      log.warn(`تعذّر قراءة ملف الحجوزات — بدء نظيف. (${(err as Error).message})`);
-    }
-    return this.items;
-  }
-
-  private flush(): void {
-    const file = BOOKINGS_FILE();
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(this.load(), null, 2), 'utf8');
-    fs.renameSync(tmp, file);
-  }
-
-  all(): Booking[] {
-    return [...this.load()];
-  }
-
-  /** الحجوزات النشطة فقط (غير الملغاة) */
-  active(): Booking[] {
-    return this.load().filter((b) => b.status === 'confirmed');
-  }
-
-  byRef(ref: string): Booking | null {
-    const r = ref.trim().toUpperCase();
-    return this.load().find((b) => b.ref.toUpperCase() === r) ?? null;
-  }
-
-  bySession(key: string): Booking[] {
-    return this.load()
-      .filter((b) => b.contact === key)
-      .sort((a, c) => c.createdAt - a.createdAt);
-  }
-
-  /** آخر حجز نشط لعميل معين */
-  latestActive(key: string): Booking | null {
-    return this.active().find((b) => b.contact === key) ?? null;
-  }
-
-  /** عدد الحجوزات النشطة في موعد معين (مع تجاهل حجز محدد عند التعديل) */
-  countAt(date: string, time: string, ignoreRef?: string): number {
-    return this.active().filter(
-      (b) => b.date === date && b.time === time && (!ignoreRef || b.ref !== ignoreRef),
-    ).length;
-  }
-
-  create(input: Omit<Booking, 'ref' | 'status' | 'createdAt' | 'updatedAt'>): Booking {
-    const booking: Booking = {
-      ...input,
-      ref: `BKG-${uid('').slice(-6).toUpperCase()}`,
-      status: 'confirmed',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    this.load().push(booking);
-    this.flush();
-    log.tool(`createBooking → ${booking.ref} | ${booking.service} | ${booking.date} ${booking.time} | ${booking.fullName ?? '?'}`);
-    return booking;
-  }
-
-  update(ref: string, patch: Partial<Pick<Booking, 'service' | 'date' | 'time' | 'fullName' | 'restaurantName' | 'city' | 'tables' | 'notes' | 'status' | 'cancelledReason'>>): Booking | null {
-    const list = this.load();
-    const i = list.findIndex((b) => b.ref === ref);
-    if (i === -1) return null;
-    list[i] = { ...list[i]!, ...patch, updatedAt: Date.now() };
-    this.flush();
-    return list[i]!;
-  }
-
-  cancel(ref: string, reason?: string): Booking | null {
-    const updated = this.update(ref, { status: 'cancelled', cancelledReason: reason });
-    if (updated) log.tool(`cancelBooking → ${ref}${reason ? ` (${reason.slice(0, 40)})` : ''}`);
-    return updated;
+  const tz = config.booking.TIMEZONE;
+  // تقدير أولي ثم تصحيح الإزاحة
+  const guess = Date.UTC(p.year, p.month - 1, p.day, hour, minute);
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: tz, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(new Date(guess));
+    const map: Record<string, number> = {};
+    for (const part of parts) if (part.type !== 'literal') map[part.type] = Number(part.value);
+    const asUTC = Date.UTC(
+      map.year!, (map.month! - 1) % 12, map.day!,
+      (map.hour! % 24), map.minute!, map.second!,
+    );
+    return guess - (asUTC - guess);
+  } catch {
+    return guess;
   }
 }
-
-export const bookingStore = new BookingStore();
 
 // ─────────────────────────────── فحص التوفر ───────────────────────────────
 
@@ -257,15 +175,11 @@ export interface DateAvailability {
   ok: boolean;
   date: string;
   dayName?: string;
-  /** سبب عدم التوفر (عربي) */
   reason?: string;
-  /** الفتحات المتاحة (بعد خصم الإشغال) */
   slots: string[];
-  /** كل فتحات اليوم (للأيام خارج العمل/المنتهية) */
   allSlots?: string[];
 }
 
-/** فحص تاريخ: هل هو صالح، وهل يوم عمل، وهل ضمن المدى؟ */
 export function dateInfo(dateStr: string): { valid: boolean; error?: string; day?: number; dayName?: string } {
   if (!parseDateParts(dateStr)) {
     return { valid: false, error: 'صيغة التاريخ غير صحيحة — استخدم YYYY-MM-DD (مثل 2026-09-14)' };
@@ -274,8 +188,19 @@ export function dateInfo(dateStr: string): { valid: boolean; error?: string; day
   return { valid: true, day, dayName: DAY_NAMES[day] };
 }
 
-/** الفتحات المتاحة فعلًا لتاريخ معين (توقيت + يوم عمل + مدى + إشغال) */
-export function availableSlotsForDate(dateStr: string): DateAvailability {
+function addMinutesToInt(hhmm: string, minutes: number): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  return (h ?? 0) * 60 + (m ?? 0) + minutes;
+}
+
+/**
+ * الفتحات المتاحة لتاريخ ما بعد خصم الإشغال المُمرَّر.
+ * @param occupied الفتحات المشغولة فعلاً (PENDING/CONFIRMED) من المستودع
+ */
+export function availableSlotsForDate(
+  dateStr: string,
+  occupied: SlotOccupancy[] = [],
+): DateAvailability {
   const info = dateInfo(dateStr);
   if (!info.valid) return { ok: false, date: dateStr, reason: info.error, slots: [] };
 
@@ -291,21 +216,22 @@ export function availableSlotsForDate(dateStr: string): DateAvailability {
   }
   if (!a.workingDays.includes(info.day!)) {
     return {
-      ok: false,
-      date: dateStr,
-      dayName: info.dayName,
-      reason: `هذا اليوم (${info.dayName}) خارج أيام عمل الحجز — نشتغل ${a.workingDayNames.join('، ')}`,
+      ok: false, date: dateStr, dayName: info.dayName,
+      reason: `هذا اليوم خارج أيام عمل الحجز — نشتغل ${a.workingDayNames.join('، ')}`,
       slots: [],
     };
   }
 
   const allSlots = slotsForDate(dateStr);
-  // لليوم نفسه: نستبعد الفتحات التي مضت أو اقتربت (مهلة الإشعار)
   const now = nowHHMM();
-  const minCut = addMinutes(now, a.minNoticeHours * 60);
-  const bookable = allSlots.filter((s) => (dateStr > today ? true : s > minCut));
+  const minCut = addMinutesToInt(now, a.minNoticeHours * 60);
+  const bookable = allSlots.filter((s) => (dateStr > today ? true : toMinutes(s) > minCut));
 
-  const free = bookable.filter((s) => bookingStore.countAt(dateStr, s) < a.maxPerSlot);
+  const counts = new Map<string, number>();
+  for (const o of occupied) {
+    if (o.slot_date === dateStr) counts.set(o.slot_time, (counts.get(o.slot_time) ?? 0) + 1);
+  }
+  const free = bookable.filter((s) => (counts.get(s) ?? 0) < a.maxPerSlot);
 
   return {
     ok: free.length > 0,
@@ -317,8 +243,18 @@ export function availableSlotsForDate(dateStr: string): DateAvailability {
   };
 }
 
-/** فحص فتحة محددة (تاريخ + وقت) */
-export function checkSlot(dateStr: string, time: string, ignoreRef?: string): { ok: boolean; reason?: string } {
+function toMinutes(hhmm: string): number {
+  const [h, m] = hhmm.split(':').map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+/** فحص فتحة محددة مع الإشغال المُمرَّر (ignoreRef يستثني حجزًا قائمًا عند التعديل) */
+export function checkSlot(
+  dateStr: string,
+  time: string,
+  occupied: SlotOccupancy[] = [],
+  ignoreId?: number,
+): { ok: boolean; reason?: string } {
   const info = dateInfo(dateStr);
   if (!info.valid) return { ok: false, reason: info.error };
 
@@ -328,7 +264,7 @@ export function checkSlot(dateStr: string, time: string, ignoreRef?: string): { 
 
   const hh = Number(slotMatch[1]);
   const mm = Number(slotMatch[2]);
-  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return { ok: false, reason: 'وقت غير صالح' };
+  if (hh > 23 || mm > 59) return { ok: false, reason: 'وقت غير صالح' };
 
   const mins = hh * 60 + mm;
   const start = a.openHour * 60;
@@ -338,11 +274,10 @@ export function checkSlot(dateStr: string, time: string, ignoreRef?: string): { 
   }
   if (mins % a.slotMinutes !== 0) {
     const nearest = Math.round(mins / a.slotMinutes) * a.slotMinutes;
-    const nearestStr = `${pad2(Math.floor(nearest / 60))}:${pad2(nearest % 60)}`;
-    return { ok: false, reason: `المواعيد تكون كل ${a.slotMinutes} دقيقة — أقرب وقت مناسب: ${nearestStr}` };
+    return { ok: false, reason: `المواعيد كل ${a.slotMinutes} دقيقة — أقرب وقت: ${pad2(Math.floor(nearest / 60))}:${pad2(nearest % 60)}` };
   }
 
-  const dayAvail = availableSlotsForDate(dateStr);
+  const dayAvail = availableSlotsForDate(dateStr, occupied);
   if (!dayAvail.ok) return { ok: false, reason: dayAvail.reason };
 
   const today = todayISO();
@@ -350,15 +285,20 @@ export function checkSlot(dateStr: string, time: string, ignoreRef?: string): { 
     return { ok: false, reason: 'هذا الوقت اقترب — يلزم حجز أبكر قليلًا' };
   }
 
-  if (bookingStore.countAt(dateStr, time, ignoreRef) >= a.maxPerSlot) {
+  const busy = occupied
+    .filter((o) => o.slot_date === dateStr && o.slot_time === time)
+    .filter((o) => !(o as unknown as { id?: number }).id || (o as unknown as { id?: number }).id !== ignoreId).length;
+  if (busy >= a.maxPerSlot) {
     return { ok: false, reason: 'هذا الموعد محجوز بالكامل — اختر وقتًا آخر من الفتحات المتاحة' };
   }
-
   return { ok: true };
 }
 
-/** أقرب أيام العمل المتاحة (مع أول فتحاتها) — للرد عندما لا يحدد العميل تاريخًا */
-export function nextAvailableDays(limit = 3): { date: string; dayName: string; slots: string[] }[] {
+/** أقرب أيام العمل المتاحة (مع أول فتحاتها) */
+export function nextAvailableDays(
+  limit = 3,
+  occupied: SlotOccupancy[] = [],
+): { date: string; dayName: string; slots: string[] }[] {
   const a = availability();
   const today = todayISO();
   const out: { date: string; dayName: string; slots: string[] }[] = [];
@@ -371,42 +311,33 @@ export function nextAvailableDays(limit = 3): { date: string; dayName: string; s
     guard++;
     const d = `${cursor.getUTCFullYear()}-${pad2(cursor.getUTCMonth() + 1)}-${pad2(cursor.getUTCDate())}`;
     if (d > maxISO()) break;
-    const res = availableSlotsForDate(d);
+    const res = availableSlotsForDate(d, occupied);
     if (res.ok && res.slots.length > 0) {
-      out.push({ date: d, dayName: res.dayName!, slots: res.slots.slice(0, 3) });
+      out.push({ date: d, dayName: res.dayName!, slots: res.slots.slice(0, a.maxPerSlot + 2) });
     }
   }
   return out;
 }
 
-// ─────────────────────────────── أدوات مساعدة ───────────────────────────────
-
-function addMinutes(hhmm: string, minutes: number): string {
-  const [h, m] = hhmm.split(':').map(Number);
-  const total = (h ?? 0) * 60 + (m ?? 0) + minutes;
-  return `${pad2(Math.floor(total / 60))}:${pad2(total % 60)}`;
+/** تسمية الحالة بالعربية */
+export function bookingStatusLabelAr(status: BookingStatus): string {
+  return {
+    PENDING: 'قيد التأكيد',
+    CONFIRMED: 'مؤكّد',
+    COMPLETED: 'مكتمل',
+    CANCELLED: 'ملغى',
+    NO_SHOW: 'بدون حضور',
+  }[status];
 }
 
-function addMinutesToInt(hhmm: string, minutes: number): number {
-  const [h, m] = hhmm.split(':').map(Number);
-  return (h ?? 0) * 60 + (m ?? 0) + minutes;
+export function bookingStatusIcon(status: BookingStatus): string {
+  return { PENDING: '⏳', CONFIRMED: '✅', COMPLETED: '🎉', CANCELLED: '❌', NO_SHOW: '🚫' }[status];
 }
 
-/** اسم الباقة (الخدمة) بالعربية */
-export function serviceName(planId: PlanId): string {
-  return getPlan(planId).name;
+/** اسم الخدمة القديمة (الباقة) — يستخدم كنسخة احتياطية عند غياب كتالوج DB */
+export function planName(planId: string | null | undefined): string {
+  if (planId === 'starter' || planId === 'pro' || planId === 'enterprise') return getPlan(planId).name;
+  return planId ?? 'خدمة';
 }
 
-/** ملخص عربي لحجز — يُعرض على العميل أو يُرسل للمدير */
-export function bookingSummary(b: Booking): string {
-  const lines = [
-    `*حجز موعد تفعيل* — ${b.ref}`,
-    `📅 التاريخ: ${b.date} · الساعة: ${b.time}`,
-    `📦 الخدمة: ${serviceName(b.service)}`,
-  ];
-  if (b.restaurantName) lines.push(`🍽️ المطعم: ${b.restaurantName}${b.city ? ` — ${b.city}` : ''}`);
-  if (b.tables && b.tables > 0) lines.push(`🪑 الطاولات: ${b.tables}`);
-  if (b.fullName) lines.push(`👤 العميل: ${b.fullName}`);
-  if (b.notes) lines.push(`📝 ملاحظات: ${b.notes}`);
-  return lines.join('\n');
-}
+export type { PlanId };

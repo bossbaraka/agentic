@@ -3,7 +3,7 @@ import path from 'node:path';
 import { config } from '../config.js';
 import { log, uid } from '../lib/utils.js';
 import { store } from '../lib/store.js';
-import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
+import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan } from './plans.js';
 import {
   buildBlueprintText,
   isProfileReady,
@@ -13,467 +13,385 @@ import {
   orderSummaryLine,
 } from './onboarding.js';
 import {
-  availability,
-  availableSlotsForDate,
-  bookingStore,
-  bookingSummary,
-  checkSlot,
+  DAY_NAMES,
+  bookingStatusLabelAr,
   formatAvailabilityText,
-  nextAvailableDays,
-  serviceName,
+  planName,
 } from './bookings.js';
+import { catalogService } from '../services/catalogService.js';
+import { bookingService } from '../services/bookingService.js';
+import { orderService } from '../services/orderService.js';
+import { ticketService } from '../services/ticketService.js';
+import { handoffService } from '../services/handoffService.js';
+import { notifications } from '../services/notificationService.js';
+import { bridge } from '../services/conversationBridge.js';
+import { ServiceError } from '../services/errors.js';
 import type { RestaurantProfile } from '../types.js';
+import { executeTool, TOOL_SPECS, type ToolHandler } from './toolRegistry.js';
+
+export type { ToolContext, ToolResult } from './tools-types.js';
+import type { ToolContext, ToolResult } from './tools-types.js';
 
 /**
- * أدوات البوت الخاصة بمنصة مُريح (Function Calling).
- *
- * الأدوات:
- *  1. get_plan_details       — تفاصيل باقة بالأسعار الدقيقة (من src/agent/plans.ts)
- *  2. recommend_plan         — توصية حتمية بالباقة حسب الطاولات والاحتياجات
- *  3. save_restaurant_profile — حفظ تفاصيل المطعم تدريجيًا في ملف الجلسة
- *  4. build_launch_blueprint — بناء التصور الكامل الجاهز للإطلاق من الملف
- *  5. confirm_launch_order   — تأكيد الطلب + إرساله لمدير المنصة + تحويل المحادثة
- *  6. create_support_ticket  — فتح تذكرة دعم للمشتركين + حفظ data/tickets.json + تنبيه
- *  (capture_subscription_lead أُبقيت للتوافق فقط ولا تُعرض على النموذج)
- *
- * للتكامل مع نظام حقيقي: استبدل جسم كل دالة بنداء API — التوقيعات ثابتة.
+ * أدوات Function Calling المعروضة على النموذج + تنفيذها عبر طبقة الخدمات.
+ * الأمان: الوسيطات تُتحقق في toolRegistry، الملكية تُفرض في الخدمات،
+ * والعملية الحساسة لا تتم بنص النموذج بل بمنطق الأعمال والقيود في قاعدة البيانات.
  */
 
-export interface ToolContext {
-  sessionKey: string;
-  customerName: string;
-  /** رقم رسالة واتساب للرد/الربط */
-  replyTo?: string;
-}
-
-export interface ToolResult {
-  ok: boolean;
-  /** ما يُرجَع للنموذج كنص */
-  data: unknown;
-  /** رسالة تُعرض على العميل مباشرة (اختياري) */
-  userMessage?: string;
-  /** إجراء جانبي يطلبه المنفّذ (مثل تنبيه الموظف) */
-  sideEffect?: {
-    kind: 'send_media' | 'notify_human' | 'notify_manager';
-    payload: Record<string, unknown>;
-  };
-}
-
-// ─────────────────────── تعريفات للدوال لـ Gemini ───────────────────────
+const uiLang = (ctx: ToolContext): 'ar' | 'en' => (ctx.language === 'en' ? 'en' : 'ar');
 
 export const TOOL_DECLARATIONS = [
   {
     functionDeclarations: [
       {
-        name: 'get_plan_details',
+        name: 'get_services',
         description:
-          'جلب تفاصيل باقة من باقات منصة مُريح بالأسعار الرسمية الدقيقة. استخدمها عندما يسأل العميل عن سعر/مزايا باقة محددة (الأساسية / الاحترافية / المؤسسات).',
+          'جلب كل خدمات المنصة الديناميكية بالأسعار من قاعدة البيانات (باقات اشتراك + خدمات رقمية: مواقع، وكلاء ذكاء اصطناعي، إدارة تواصل، واتساب، حجوزات، حلول مخصصة). استخدمها عندما يسأل العميل «وش خدماتكم؟» أو يريد استعراض المتاح.',
         parameters: {
           type: 'OBJECT',
           properties: {
-            plan_id: {
-              type: 'STRING',
-              enum: ['starter', 'pro', 'enterprise'],
-              description:
-                'starter = الباقة الأساسية، pro = الباقة الاحترافية، enterprise = باقة المؤسسات والسلاسل',
-            },
-            billing: {
-              type: 'STRING',
-              enum: ['monthly', 'yearly'],
-              description: 'فترة الدفع المطلوبة (اختياري، الافتراضي monthly)',
-            },
+            category: { type: 'STRING', description: 'slug التصنيف اختياريًا (subscriptions | digital-services)' },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'get_service_details',
+        description:
+          'جلب تفاصيل خدمة محددة: الوصف، السعر (أو «حسب الطلب»)، المدة المتوقعة، المزايا، ومدى توفر الحجز. تمرر service_id كرقم أو slug مثل starter/pro/enterprise/website/ai-agent.',
+        parameters: {
+          type: 'OBJECT',
+          properties: { service_id: { type: 'STRING', description: 'رقم الخدمة أو slug' } },
+          required: ['service_id'],
+        },
+      },
+      {
+        name: 'get_plan_details',
+        description:
+          'تفاصيل باقة اشتراك بالأسعار الرسمية الدقيقة (starter=الأساسية، pro=الاحترافية، enterprise=المؤسسات) مع السعر الشهري/السنوي والمزايا.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            plan_id: { type: 'STRING', enum: ['starter', 'pro', 'enterprise'] },
+            billing: { type: 'STRING', enum: ['monthly', 'yearly'] },
           },
           required: ['plan_id'],
         },
       },
       {
         name: 'recommend_plan',
-        description:
-          'توصية بالباقة الأنسب لمطعم العميل حسب عدد الطاولات واحتياجاته. استخدمها عندما يعرف العميل عدد طاولاته أو مزاياه المطلوبة ولم يحسم باقة بعد.',
+        description: 'توصية حتمية بالباقة الأنسب حسب عدد الطاولات والاحتياجات.',
         parameters: {
           type: 'OBJECT',
           properties: {
-            tables: {
-              type: 'NUMBER',
-              description: 'عدد الطاولات في المطعم (اختياري إن لم يذكر العميل)',
-            },
-            needs: {
-              type: 'ARRAY',
-              items: { type: 'STRING' },
-              description:
-                'احتياجات العميل بكلمات قصيرة (مثال: ["شاشة مطبخ","هوية بصرية"] أو ["فروع متعددة"])',
-            },
+            tables: { type: 'NUMBER' },
+            needs: { type: 'ARRAY', items: { type: 'STRING' } },
           },
           required: [],
-        },
-      },
-      {
-        name: 'save_restaurant_profile',
-        description:
-          'حفظ تفاصيل المطعم التي ذكرها العميل (اسم، مطعم، مدينة، فروع، طاولات، باقة، أصناف، شعار). استدعِها كلما ذكر العميل أي تفصيلة — كل الحقول اختيارية وتُدمج مع السابق. لا تسأل عن كل الحقول دفعة واحدة؛ سؤال واحد فقط في كل رد.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            full_name: { type: 'STRING', description: 'اسم العميل' },
-            restaurant_name: { type: 'STRING', description: 'اسم المطعم/المقهى' },
-            city: { type: 'STRING', description: 'مدينة المطعم' },
-            branches: { type: 'NUMBER', description: 'عدد الفروع (1 لو فرع واحد)' },
-            tables: { type: 'NUMBER', description: 'عدد الطاولات' },
-            preferred_plan: {
-              type: 'STRING',
-              enum: ['starter', 'pro', 'enterprise'],
-              description: 'الباقة المختارة: starter=الأساسية، pro=الاحترافية، enterprise=المؤسسات',
-            },
-            menu_items: { type: 'NUMBER', description: 'عدد أصناف المنيو التقريبي' },
-            has_logo: { type: 'BOOLEAN', description: 'هل الشعار/الهوية جاهزان عند العميل؟' },
-            notes: { type: 'STRING', description: 'أي ملاحظات إضافية ذكرها العميل' },
-          },
-          required: [],
-        },
-      },
-      {
-        name: 'build_launch_blueprint',
-        description:
-          'بناء «التصور الكامل الجاهز للإطلاق» من ملف المطعم المحفوظ (التجهيزات + السعر + خطوات الإطلاق). استدعِها فقط عندما يكتمل الملف الأساسي (الاسم، المطعم، المدينة، الطاولات، الباقة). اعرض نتيجتها على العميل كما هي ثم اطلب تأكيد الطلب.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {},
-          required: [],
-        },
-      },
-      {
-        name: 'confirm_launch_order',
-        description:
-          'تأكيد طلب الإطلاق وإرسال الملف الكامل لمدير المنصة وتحويل المحادثة إليه. استدعِها فقط بعد أن عرضت التصور على العميل ووافق عليه صراحة (نعم/أكيد/تم/أكّد). لا تستدعِها أبدًا قبل عرض التصور.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            confirmed: { type: 'BOOLEAN', description: 'تأكيد العميل الصريح (يجب أن يكون true)' },
-            notes: { type: 'STRING', description: 'ملاحظات أخيرة قبل الإرسال لمدير المنصة (اختياري)' },
-          },
-          required: ['confirmed'],
-        },
-      },
-      {
-        name: 'create_support_ticket',
-        description:
-          'فتح تذكرة دعم لمشترك لديه مشكلة تقنية أو شكوى. استخدمها عندما يكون العميل مشترَكًا بالفعل وواجه مشكلة في المنصة، أو عند أي شكوى جدية.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {
-            restaurant_name: { type: 'STRING', description: 'اسم مطعم العميل' },
-            plan: { type: 'STRING', description: 'باقة العميل إن عُرفت (اختياري)' },
-            issue: { type: 'STRING', description: 'وصف المشكلة كما رآها العميل' },
-            priority: {
-              type: 'STRING',
-              enum: ['low', 'normal', 'high', 'urgent'],
-              description:
-                'urgent = النظام متوقف تمامًا عن العمل، high = مشكلة حرجة تؤثر على الخدمة، normal = مشكلة عادية، low = استفسار/اقتراح',
-            },
-          },
-          required: ['restaurant_name', 'issue', 'priority'],
         },
       },
       {
         name: 'get_menu',
-        description:
-          'جلب قائمة المنتجات/الخدمات بالأسعار الرسمية (باقات الاشتراك الثلاث: الأساسية/الاحترافية/المؤسسات). استخدمها عندما يسأل العميل «وش عندكم؟» أو يريد رؤية كل الخيارات والأسعار دفعة واحدة.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {},
-          required: [],
-        },
+        description: 'قائمة باقات الاشتراك الثلاث بأسعارها الرسمية المختصرة.',
+        parameters: { type: 'OBJECT', properties: {}, required: [] },
       },
       {
-        name: 'get_restaurant_info',
+        name: 'save_restaurant_profile',
         description:
-          'جلب معلومات النشاط الرسمية: الاسم، القنوات، ساعات عمل فريق الحجز/التفعيل. استخدمها عندما يسأل العميل عن ساعات العمل أو طرق التواصل أو معلومات عامة عن النشاط.',
-        parameters: {
-          type: 'OBJECT',
-          properties: {},
-          required: [],
-        },
+          'حفظ تفاصيل المطعم التي ذكرها العميل تدريجيًا (اسم، مطعم، مدينة، فروع، طاولات، باقة، أصناف، شعار، ملاحظات). استدعِها كلما ذكر أي تفصيلة — الحقول كلها اختيارية وتُدمج. لا تسأل عن كل الحقول دفعة واحدة.',
+        parameters: { type: 'OBJECT', properties: {
+          full_name: { type: 'STRING' },
+          restaurant_name: { type: 'STRING' },
+          city: { type: 'STRING' },
+          branches: { type: 'NUMBER' },
+          tables: { type: 'NUMBER' },
+          preferred_plan: { type: 'STRING', enum: ['starter', 'pro', 'enterprise'] },
+          menu_items: { type: 'NUMBER' },
+          has_logo: { type: 'BOOLEAN' },
+          notes: { type: 'STRING' },
+        }, required: [] },
       },
       {
-        name: 'get_customer',
-        description:
-          'جلب بيانات العميل المحفوظة في الجلسة (الاسم، المطعم، المدينة، الطاولات، الباقة) مع حجوزاته النشطة. استخدمها قبل سؤال العميل عن بيانات سبق ذكرها، أو عندما يسأل عن حالة حجوزه.',
+        name: 'build_launch_blueprint',
+        description: 'بناء التصور الكامل للإطلاق من الملف المكتمل (الاسم، المطعم، المدينة، الطاولات، الباقة) — اعرضه ثم اطلب التأكيد.',
+        parameters: { type: 'OBJECT', properties: {}, required: [] },
+      },
+      {
+        name: 'confirm_launch_order',
+        description: 'تأكيد طلب الإطلاق بعد موافقة العميل الصريحة على التصور (confirmed=true). يحفظ الطلب في قاعدة البيانات وينبّه المدير وتُحوّل المحادثة له. ممنوع قبل عرض التصور وموافقة العميل.',
         parameters: {
           type: 'OBJECT',
-          properties: {},
-          required: [],
+          properties: { confirmed: { type: 'BOOLEAN' }, notes: { type: 'STRING' } },
+          required: ['confirmed'],
         },
       },
       {
         name: 'check_availability',
         description:
-          'التحقق من المواعيد المتاحة للحجز في تاريخ محدد (YYYY-MM-DD). أرجع الفتحات المتاحة فعلًا بعد خصم الإشغال. إن لم يحدد العميل تاريخًا، أرجع أقرب الأيام المتاحة. استخدمها دائمًا قبل عرض أي موعد أو تأكيد حجز — ولا تعرض موعدًا من عندك أبدًا.',
+          'المواعيد المتاحة للحجز (date=YYYY-MM-DD اختياري، time=HH:MM اختياري). بدون تاريخ تُرجع أقرب الأيام المتاحة فعليًا بعد خصم الإشغال. استخدمها دائمًا قبل عرض أي موعد — لا تخترع موعدًا.',
         parameters: {
           type: 'OBJECT',
-          properties: {
-            date: {
-              type: 'STRING',
-              description: 'التاريخ المطلوب بصيغة YYYY-MM-DD (اختياري — إن تُرك فارغًا تُرجع أقرب الأيام المتاحة)',
-            },
-            time: {
-              type: 'STRING',
-              description: 'وقت محدد بصيغة HH:MM للتحقق من فتحة معينة (اختياري)',
-            },
-          },
+          properties: { date: { type: 'STRING' }, time: { type: 'STRING' }, service: { type: 'STRING' } },
           required: [],
         },
       },
       {
         name: 'create_booking',
         description:
-          'إنشاء حجز (موعد تفعيل) للعميل بعد التأكد من التوفر. لا تستدعِها إلا بعد جمع: الباقة (الخدمة) + التاريخ + الوقت، وبعد نجاح check_availability. لا تؤكد للعميل أي حجز قبل نجاح هذه الأداة. اسم العميل/المطعم/المدينة/الطاولات تُؤخذ من ذاكرة الجلسة إن وُجدت.',
+          'إنشاء حجز موعد (service = slug الخدمة/الباقة، date، time) — يُستدعى بعد نجاح check_availability وجمع الخدمة/التاريخ/الوقت. يمنع الحجز المزدوج تلقائيًا. لا تؤكد للحجز قبل نجاح الأداة.',
         parameters: {
           type: 'OBJECT',
           properties: {
-            service: {
-              type: 'STRING',
-              enum: ['starter', 'pro', 'enterprise'],
-              description: 'الباقة المحجوزة (الخدمة): starter=الأساسية، pro=الاحترافية، enterprise=المؤسسات',
-            },
-            date: { type: 'STRING', description: 'تاريخ الحجز بصيغة YYYY-MM-DD' },
-            time: { type: 'STRING', description: 'وقت الحجز بصيغة HH:MM' },
-            full_name: { type: 'STRING', description: 'اسم العميل (اختياري إن كان محفوظًا في الجلسة)' },
-            restaurant_name: { type: 'STRING', description: 'اسم المطعم (اختياري)' },
-            city: { type: 'STRING', description: 'المدينة (اختياري)' },
-            tables: { type: 'NUMBER', description: 'عدد الطاولات (اختياري)' },
-            notes: { type: 'STRING', description: 'ملاحظات خاصة (اختياري)' },
+            service: { type: 'STRING', description: 'slug الخدمة مثل pro/website أو رقمها' },
+            service_id: { type: 'STRING' },
+            date: { type: 'STRING' },
+            time: { type: 'STRING' },
+            full_name: { type: 'STRING' },
+            restaurant_name: { type: 'STRING' },
+            city: { type: 'STRING' },
+            tables: { type: 'NUMBER' },
+            notes: { type: 'STRING' },
           },
-          required: ['service', 'date', 'time'],
+          required: ['date', 'time'],
         },
       },
       {
         name: 'update_booking',
-        description:
-          'تعديل حجز موجود (التاريخ/الوقت/الباقة/الملاحظات). حدد الحجز بمعرّفه booking_ref أو استخدم آخر حجز نشط للعميل. تحقق من التوفر الجديد أولًا بأداة check_availability قبل التعديل. لا تقل «تم التعديل» إلا بعد نجاح الأداة.',
+        description: 'تعديل حجز (التاريخ/الوقت/الخدمة) بعد التحقق من التوفر الجديد. booking_ref اختياريًا (بدونه آخر حجز نشط للعميل).',
         parameters: {
           type: 'OBJECT',
           properties: {
-            booking_ref: { type: 'STRING', description: 'معرّف الحجز BKG-XXXXXX (اختياري — يُستخدم آخر حجز نشط إن تُرك فارغًا)' },
-            service: {
-              type: 'STRING',
-              enum: ['starter', 'pro', 'enterprise'],
-              description: 'الباقة الجديدة (اختياري)',
-            },
-            date: { type: 'STRING', description: 'التاريخ الجديد بصيغة YYYY-MM-DD (اختياري)' },
-            time: { type: 'STRING', description: 'الوقت الجديد بصيغة HH:MM (اختياري)' },
-            notes: { type: 'STRING', description: 'ملاحظات محدّثة (اختياري)' },
+            booking_ref: { type: 'STRING' },
+            service: { type: 'STRING' },
+            date: { type: 'STRING' },
+            time: { type: 'STRING' },
+            notes: { type: 'STRING' },
           },
           required: [],
         },
       },
       {
         name: 'cancel_booking',
-        description:
-          'إلغاء حجز موجود. حدد الحجز بمعرّفه booking_ref أو استخدم آخر حجز نشط للعميل. اسأل العميل عن السبب بلطف قبل الإلغاء. لا تقل «تم الإلغاء» إلا بعد نجاح الأداة.',
+        description: 'إلغاء حجز نشط. booking_ref اختياريًا (بدونه آخر حجز نشط للعميل). اسأل عن السبب بلطف أولًا. لا تؤكد الإلغاء قبل نجاح الأداة.',
         parameters: {
           type: 'OBJECT',
-          properties: {
-            booking_ref: { type: 'STRING', description: 'معرّف الحجز BKG-XXXXXX (اختياري — يُستخدم آخر حجز نشط إن تُرك فارغًا)' },
-            reason: { type: 'STRING', description: 'سبب الإلغاء (اختياري — مفيد لتقليل التكرار وتحسين الخدمة)' },
-          },
+          properties: { booking_ref: { type: 'STRING' }, reason: { type: 'STRING' } },
           required: [],
         },
       },
       {
-        name: 'send_notification',
-        description:
-          'إرسال تنبيه داخلي للموظف البشري/مدير المنصة (لا يظهر نصه للعميل). استخدمها عند حجز/تعديل/إلغاء مهم، أو عند حالة تحتاج متابعة بشرية فورية. لا تستخدمها إلا لتنبيه الفريق بأمر يتطلب تدخلًا بشريًا.',
+        name: 'get_customer_bookings',
+        description: 'جلب حجوزات العميل الحالية والسابقة بحالاتها. استخدمها عندما يسأل «حجوزاتي» أو «موعدي».',
+        parameters: { type: 'OBJECT', properties: {}, required: [] },
+      },
+      {
+        name: 'get_order_status',
+        description: 'متابعة حالة طلب برقمه المرجعي (ORD-XXXXXX). يرفض طلبات العملاء الآخرين.',
+        parameters: { type: 'OBJECT', properties: { order_ref: { type: 'STRING' } }, required: ['order_ref'] },
+      },
+      {
+        name: 'get_customer',
+        description: 'بيانات العميل المحفوظة + حجوزاته النشطة + طلباته. استخدمها قبل إعادة سؤاله عن بيانات سبق إعطاؤها.',
+        parameters: { type: 'OBJECT', properties: {}, required: [] },
+      },
+      {
+        name: 'create_support_ticket',
+        description: 'فتح تذكرة دعم لمشترك لديه مشكلة تقنية أو شكوى جدية (issue وصف واضح، restaurant_name، priority). تُحوّل المحادثة لموظف بشري تلقائيًا.',
         parameters: {
           type: 'OBJECT',
           properties: {
-            message: { type: 'STRING', description: 'نص التنبيه الداخلي للفريق' },
-            to: {
-              type: 'STRING',
-              enum: ['manager', 'human'],
-              description: 'جهة التنبيه: manager=مدير المنصة، human=الموظف البشري المناوب',
-            },
-            priority: {
-              type: 'STRING',
-              enum: ['low', 'normal', 'high', 'urgent'],
-              description: 'أولوية التنبيه (اختياري، الافتراضي normal)',
-            },
+            restaurant_name: { type: 'STRING' },
+            plan: { type: 'STRING' },
+            issue: { type: 'STRING' },
+            priority: { type: 'STRING', enum: ['low', 'normal', 'high', 'urgent'] },
+          },
+          required: ['issue', 'priority'],
+        },
+      },
+      {
+        name: 'handoff_to_human',
+        description: 'تحويل المحادثة لموظف بشري عند: طلب العميل لإنسان، شكوى جدية، عملية مالية/حساسة، سؤال لا تملك إجابته، أو تعثّر مرتين متتاليتين.',
+        parameters: {
+          type: 'OBJECT',
+          properties: { reason: { type: 'STRING', description: 'سبب التحويل باختصار' }, summary: { type: 'STRING' } },
+          required: ['reason'],
+        },
+      },
+      {
+        name: 'send_notification',
+        description: 'تنبيه داخلي للفريق (manager/human) لا يظهر للعميل — لحالات تحتاج متابعة بشرية فورية فقط.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            message: { type: 'STRING' },
+            to: { type: 'STRING', enum: ['manager', 'human'] },
+            priority: { type: 'STRING', enum: ['low', 'normal', 'high', 'urgent'] },
           },
           required: ['message'],
         },
+      },
+      {
+        name: 'get_restaurant_info',
+        description: 'معلومات النشاط الرسمية: الهوية، القنوات، ساعات عمل فريق الحجز.',
+        parameters: { type: 'OBJECT', properties: {}, required: [] },
       },
     ],
   },
 ];
 
-// ─────────────────────── حفظ ليدز/تذاكر (JSON ذرّي) ───────────────────────
+// ───────────────────────── أدوات مساعدة للعرض ─────────────────────────
 
-async function appendJsonFile(name: 'leads' | 'tickets' | 'orders', record: Record<string, unknown>): Promise<void> {
-  const file = path.join(config.paths.DATA_DIR, `${name}.json`);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-
-  let all: Record<string, unknown>[] = [];
-  try {
-    const raw = await fs.readFile(file, 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) all = parsed;
-  } catch {
-    /* أول تسجيل */
-  }
-  all.push(record);
-
-  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(all, null, 2), 'utf-8');
-  await fs.rename(tmp, file);
+function priceText(price: number | null, billing: string | null, lang: 'ar' | 'en'): string {
+  if (price === null || price === undefined) return lang === 'en' ? 'On request' : 'حسب الطلب';
+  const suf = billing === 'monthly' ? (lang === 'en' ? '/month' : ' ₪/شهر')
+    : billing === 'yearly' ? (lang === 'en' ? '/year' : ' ₪/سنة')
+    : billing === 'hourly' ? (lang === 'en' ? '/hour' : ' ₪/ساعة')
+    : lang === 'en' ? ' ILS' : ' ₪';
+  return `*${price}${suf}*`;
 }
 
-// ─────────────────────── التنفيذ ───────────────────────
+function serviceDetailsMessage(view: ReturnType<typeof catalogService.view>, lang: 'ar' | 'en'): string {
+  const lines = [
+    `*${view.name}*`,
+    '',
+    view.description,
+    '',
+    lang === 'en' ? `💵 ${priceText(view.price, view.billingPeriod, lang)}` : `💵 السعر: ${priceText(view.price, view.billingPeriod, lang)}`,
+  ];
+  if (view.durationText) {
+    lines.push(lang === 'en' ? `⏱️ Duration: ${view.durationText}` : `⏱️ المدة المتوقعة: ${view.durationText}`);
+  }
+  if (view.availabilityText) lines.push(lang === 'en' ? `📅 ${view.availabilityText}` : `📅 ${view.availabilityText}`);
+  if (view.features.length) {
+    lines.push('', lang === 'en' ? '✨ What you get:' : '✨ المزايا:');
+    for (const f of view.features.slice(0, 8)) lines.push(`• ${f}`);
+  }
+  if (view.isBookable) {
+    lines.push('', lang === 'en' ? 'Tap 📅 Book an activation slot to pick a time.' : 'تبيني أحجز لك موعد تفعيل؟ اضغط زر الحجز أو قل لي اليوم المناسب.');
+  } else {
+    lines.push('', lang === 'en' ? 'Tap 📝 Request this service and our team will contact you.' : 'تبيني أرفع طلبك للفريق؟ اضغط «اطلب الخدمة» أو اكتب لي تفاصيل مشروعك.');
+  }
+  return lines.join('\n');
+}
 
-type Handler = (args: Record<string, any>, ctx: ToolContext) => Promise<ToolResult> | ToolResult;
+// ───────────────────────── التنفيذ ─────────────────────────
 
-export const TOOL_HANDLERS: Record<string, Handler> = {
-  /** تفاصيل باقة بالأسعار الرسمية (دائمًا من plans.ts) */
+const HANDLERS: Record<string, ToolHandler> = {
+  get_services(_args, ctx) {
+    const lang = uiLang(ctx);
+    const groups = catalogService.byCategory(lang);
+    const data = groups.map((g) => ({
+      category: lang === 'en' ? g.category.name_en || g.category.name_ar : g.category.name_ar,
+      services: g.services.map((s) => ({
+        id: s.id, slug: s.slug, name: s.name, price: s.price, billing: s.billingPeriod,
+        bookable: s.isBookable, duration: s.durationText ?? null,
+      })),
+    }));
+    const lines: string[] = [];
+    for (const g of groups) {
+      lines.push(`*${lang === 'en' && g.category.name_en ? g.category.name_en : g.category.name_ar}*`);
+      for (const s of g.services) {
+        lines.push(`• ${s.name} — ${priceText(s.price, s.billingPeriod, lang)}`);
+      }
+      lines.push('');
+    }
+    lines.push(lang === 'en'
+      ? 'Which service would you like details about?'
+      : 'أي خدمة تحب أشرح لك تفاصيلها وأسعارها؟');
+    log.tool('get_services → كتالوج ديناميكي');
+    return { ok: true, data: { groups: data }, userMessage: lines.join('\n').trim() };
+  },
+
+  get_service_details(args, ctx) {
+    const lang = uiLang(ctx);
+    const view = catalogService.details(String(args.service_id), lang);
+    if (!view) return { ok: false, data: { error: 'الخدمة غير موجودة' }, userMessage: 'ما لقيت هذي الخدمة عندي — تبي أشوف لك قائمة الخدمات؟' };
+    log.tool(`get_service_details → ${view.slug}`);
+    return {
+      ok: true,
+      data: {
+        id: view.id, slug: view.slug, name: view.name, price: view.price,
+        billing: view.billingPeriod, durationText: view.durationText,
+        bookable: view.isBookable, features: view.features,
+      },
+      userMessage: serviceDetailsMessage(view, lang),
+    };
+  },
+
   get_plan_details(args) {
-    const id = (['starter', 'pro', 'enterprise'].includes(args.plan_id) ? args.plan_id : 'pro') as PlanId;
+    const id = ['starter', 'pro', 'enterprise'].includes(args.plan_id) ? args.plan_id : 'pro';
     const billing = args.billing === 'yearly' ? 'yearly' : 'monthly';
     const plan = getPlan(id);
-
     const lines = [
       `*${plan.name}*${plan.mostPopular ? ' ← الأكثر طلبًا' : ''} — ${plan.tagline}`,
       billing === 'monthly'
-        ? `السعر: *${plan.priceMonthly} ₪/شهر* — ثابت مهما زادت طلباتك، وبدون رسوم مخفية`
+        ? `السعر: *${plan.priceMonthly} ₪/شهر* — ثابت مهما زادت طلباتك، بدون رسوم مخفية`
         : `السعر السنوي: *${plan.priceYearly} ₪* دفعة واحدة (≈ ${plan.priceYearlyPerMonth} ₪/شهر)`,
     ];
-    if (billing === 'monthly') {
-      lines.push(`ولو دفعت سنوي: ${plan.priceYearlyPerMonth} ₪/شهر — توفير *${plan.yearlySavings} ₪* (~17%)`);
-    }
+    if (billing === 'monthly') lines.push(`الدفع السنوي: ${plan.priceYearlyPerMonth} ₪/شهر — توفير *${plan.yearlySavings} ₪* (~17%)`);
     lines.push('وش تحصل عليه:');
     for (const f of plan.features) lines.push(`• ${f}`);
     lines.push('تبيني أجهّز لك التفعيل على هذي الباقة؟');
-
     log.tool(`get_plan_details → ${id} (${billing})`);
     return { ok: true, data: { plan: plan.id, billing, price: plan[billing === 'monthly' ? 'priceMonthly' : 'priceYearly'] }, userMessage: lines.join('\n') };
   },
 
-  /** توصية حتمية بالباقة */
   recommend_plan(args) {
     const tables = typeof args.tables === 'number' && args.tables > 0 ? Math.round(args.tables) : undefined;
     const needs = Array.isArray(args.needs) ? args.needs.map(String) : [];
     const rec = recommendPlan({ tables, needs });
     const p = rec.plan;
-
-    log.tool(`recommend_plan → ${p.id} (tables=${tables ?? '?'}, needs=${needs.join(',') || '—'})`);
-
-    const perTable = tables ? `، يعني ~*${perTableMonthly(p, tables)} ₪* بس للطاولة الواحدة` : '';
+    const perTable = tables ? `، يعني ~*${perTableMonthly(p, tables)} ₪* للطاولة الواحدة` : '';
+    log.tool(`recommend_plan → ${p.id} (tables=${tables ?? '?'})`);
     return {
       ok: true,
       data: { recommended: p.id, priceMonthly: p.priceMonthly, priceYearly: p.priceYearly, reason: rec.reason },
       userMessage: [
         `أنسب باقة لحالتك: *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}${perTable}`,
         rec.reason + '.',
-        `ولو سنوي: ${p.priceYearlyPerMonth} ₪/شهر — توفير *${p.yearlySavings} ₪*، وبدون بطاقة للبدء، والترقية من اللوحة بأي وقت.`,
+        `ولو سنوي: ${p.priceYearlyPerMonth} ₪/شهر — توفير *${p.yearlySavings} ₪*، وبدون بطاقة للبدء.`,
         'تبيني أجهّز لك التفعيل؟',
       ].join('\n'),
     };
   },
 
-  /** @deprecated استُبدلت بمسار التجهيز للإطلاق (profile→blueprint→confirm). تُبقى للتوافق الخلفي فقط. */
-  async capture_subscription_lead(args, ctx) {
-    const lead = {
-      ref: `SUB-${uid('').slice(-6).toUpperCase()}`,
-      full_name: String(args.full_name ?? 'غير مذكور'),
-      restaurant_name: String(args.restaurant_name ?? 'غير مذكور'),
-      city: String(args.city ?? 'غير مذكورة'),
-      tables: args.tables ?? null,
-      preferred_plan: String(args.preferred_plan ?? 'غير محددة'),
-      whatsapp_number: String(args.whatsapp_number ?? ctx.sessionKey),
-      sessionKey: ctx.sessionKey,
-      customer_name_profile: ctx.customerName || null,
-      created_at: new Date().toISOString(),
-    };
+  get_menu() {
+    const lines = ['*باقاتنا الثلاث* — كلها بدون عقود وبدون رسوم مخفية:'];
+    for (const p of MUREEH_PLANS) {
+      lines.push(`• *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`);
+    }
+    lines.push('\nوعندنا خدمات رقمية ثانية (مواقع، وكلاء ذكاء، حجوزات...) — اطلب قائمة الخدمات أعرضها لك.');
+    return { ok: true, data: { plans: MUREEH_PLANS.map((p) => ({ id: p.id, priceMonthly: p.priceMonthly })) }, userMessage: lines.join('\n') };
+  },
 
-    await appendJsonFile('leads', lead);
-    log.tool(`capture_subscription_lead → ${lead.ref} | ${lead.full_name} | ${lead.restaurant_name} (${lead.city}) | ${lead.tables} طاولة | ${lead.preferred_plan}`);
-
-    // تثبيت بيانات العميل في ملف الجلسة والذاكرة الدائمة
-    store.patchProfile(ctx.sessionKey, {
-      full_name: lead.full_name !== 'غير مذكور' ? lead.full_name : undefined,
-      restaurant_name: lead.restaurant_name !== 'غير مذكور' ? lead.restaurant_name : undefined,
-      city: lead.city !== 'غير مذكورة' ? lead.city : undefined,
-      tables: typeof lead.tables === 'number' && lead.tables > 0 ? lead.tables : undefined,
-      preferred_plan: ['starter', 'pro', 'enterprise'].includes(lead.preferred_plan) ? (lead.preferred_plan as PlanId) : undefined,
-    });
-    store.patchLaunch(ctx.sessionKey, {
-      status: 'confirmed',
-      orderRef: lead.ref,
-      confirmedAt: Date.now(),
-    });
-
-    const planName =
-      MUREEH_PLANS.find((p) => p.id === lead.preferred_plan)?.name ?? lead.preferred_plan;
-
+  get_restaurant_info(_args, ctx) {
+    const lang = uiLang(ctx);
+    if (lang === 'en') {
+      return {
+        ok: true,
+        data: { working_hours: formatAvailabilityText('en'), timezone: config.booking.TIMEZONE },
+        userMessage: [
+          '*MUREEH* — a cloud platform for restaurants and cafés (QR menu, live kitchen screen, POS, analytics) plus custom digital services.',
+          '💬 Sales & support on Telegram/WhatsApp: +972 599 891 559',
+          `⏰ Activation-team hours: ${formatAvailabilityText('en')}`,
+          '🤖 I reply 24/7; human follow-up is during working hours.',
+        ].join('\n'),
+      };
+    }
     return {
       ok: true,
-      data: lead,
-      userMessage:
-        `يا سلام، سجّلت طلب التفعيل ✅ الرقم: *${lead.ref}*\n` +
-        `*${lead.restaurant_name}* — ${lead.city} · ${lead.tables} طاولة · *${planName}*\n\n` +
-        `الفريق يتواصل معك الآن لاستكمال التجهيز — خلال دقائق عادة وبدون بطاقة ائتمانية للبدء 🚀`,
-      sideEffect: {
-        kind: 'notify_human',
-        payload: {
-          note:
-            `💼 *ليد اشتراك جديد* ${lead.ref}\n` +
-            `العميل: ${lead.full_name} — ${lead.whatsapp_number}\n` +
-            `المطعم: ${lead.restaurant_name} (${lead.city}) · ${lead.tables} طاولة\n` +
-            `الباقة: ${planName}`,
-        },
-      },
+      data: { working_hours: formatAvailabilityText('ar'), timezone: config.booking.TIMEZONE },
+      userMessage: [
+        '*منصة مُريح* — نظام إدارة مطاعم ومقاهٍ سحابي (منيو QR، شاشة مطبخ حية، كاشير، تحليلات) + خدمات رقمية مخصصة.',
+        '💬 المبيعات والدعم: +972 599 891 559 (تيليجرام/واتساب)',
+        `⏰ ساعات عمل فريق الحجز والتفعيل: ${formatAvailabilityText('ar')}`,
+        '🤖 أرد عليك 24/7، والمتابعة البشرية خلال ساعات العمل.',
+      ].join('\n'),
     };
   },
 
-  /** تذكرة دعم للمشتركين */
-  async create_support_ticket(args, ctx) {
-    const ticket = {
-      ref: `TCK-${uid('').slice(-6).toUpperCase()}`,
-      restaurant_name: String(args.restaurant_name ?? 'غير مذكور'),
-      plan: args.plan ?? null,
-      issue: String(args.issue ?? ''),
-      priority: String(args.priority ?? 'normal'),
-      sessionKey: ctx.sessionKey,
-      customer_name_profile: ctx.customerName || null,
-      created_at: new Date().toISOString(),
-    };
+  // ───────── ملف المطعم ومسار الإطلاق ─────────
 
-    await appendJsonFile('tickets', ticket);
-    log.tool(`create_support_ticket → ${ticket.ref} | ${ticket.restaurant_name} | [${ticket.priority}] ${ticket.issue.slice(0, 60)}`);
-
-    const prioAr: Record<string, string> = {
-      urgent: 'عاجلة (الخدمة متوقفة)',
-      high: 'عالية',
-      normal: 'عادية',
-      low: 'منخفضة',
-    };
-
-    return {
-      ok: true,
-      data: ticket,
-      userMessage:
-        `فتحت لك متابعة فورية برقم *${ticket.ref}* (أولوية: ${prioAr[ticket.priority] ?? 'عادية'}).\n` +
-        `زميلي من الدعم يكمل معك قريبًا. أنا آسف على الإزعاج، وبنحلّها.`,
-      sideEffect: {
-        kind: 'notify_human',
-        payload: {
-          note:
-            `️ *تذكرة دعم جديدة* ${ticket.ref}\n` +
-            `المطعم: ${ticket.restaurant_name}${ticket.plan ? ` (${ticket.plan})` : ''}\n` +
-            `الأولوية: ${ticket.priority}\n` +
-            `المشكلة: ${ticket.issue.slice(0, 200)}`,
-        },
-      },
-    };
-  },
-
-  /** حفظ/دمج تفاصيل المطعم في ملف الجلسة — خطوة بخطوة */
   save_restaurant_profile(args, ctx) {
     const patch: Partial<RestaurantProfile> = {};
     if (typeof args.full_name === 'string' && args.full_name.trim()) patch.full_name = args.full_name.trim().slice(0, 60);
@@ -486,436 +404,363 @@ export const TOOL_HANDLERS: Record<string, Handler> = {
     if (typeof args.has_logo === 'boolean') patch.has_logo = args.has_logo;
     if (typeof args.notes === 'string' && args.notes.trim()) patch.notes = args.notes.trim().slice(0, 500);
     if (!ctx.sessionKey.startsWith('tg:')) patch.whatsapp_number = ctx.sessionKey;
-    else if (typeof args.whatsapp_number === 'string' && args.whatsapp_number.trim()) patch.whatsapp_number = args.whatsapp_number.trim();
 
     const profile = store.patchProfile(ctx.sessionKey, patch);
     store.patchLaunch(ctx.sessionKey, { status: 'collecting' });
+    bridge.patchCustomer(ctx.sessionKey, {
+      fullName: patch.full_name, restaurantName: patch.restaurant_name, city: patch.city,
+      tables: patch.tables, branches: patch.branches, preferredPlan: patch.preferred_plan, notes: patch.notes,
+    });
     const missing = missingRequired(profile);
-    const ready = missing.length === 0;
-
-    log.tool(`save_restaurant_profile → ${ctx.sessionKey} | ناقص: ${missing.join(',') || 'لا شيء — جاهز ✅'}`);
-
-    return {
-      ok: true,
-      data: {
-        profile,
-        missing,
-        next_question: nextQuestion(profile),
-        ready_for_blueprint: ready,
-      },
-    };
+    log.tool(`save_restaurant_profile → ناقص: ${missing.join(',') || 'لا شيء'}`);
+    return { ok: true, data: { profile, missing, next_question: nextQuestion(profile), ready_for_blueprint: missing.length === 0 } };
   },
 
-  /** بناء التصور الكامل الجاهز للإطلاق من الملف المحفوظ */
   build_launch_blueprint(_args, ctx) {
     const session = store.get(ctx.sessionKey);
     const profile = session.profile ?? {};
-
     if (!isProfileReady(profile)) {
       const missing = missingRequired(profile);
-      log.tool(`build_launch_blueprint → ناقص: ${missing.join(',')}`);
-      return {
-        ok: false,
-        data: { missing, next_question: nextQuestion(profile) },
-        userMessage: '',
-      };
+      return { ok: false, data: { missing, next_question: nextQuestion(profile) }, userMessage: '' };
     }
-
     const blueprint = buildBlueprintText(profile);
     store.patchLaunch(ctx.sessionKey, { status: 'awaiting_confirmation', blueprint });
-    log.tool(`build_launch_blueprint → ${ctx.sessionKey} | ${profile.restaurant_name} (${profile.city})`);
-
     return {
-      ok: true,
-      data: { blueprint, ready: true },
-      userMessage:
-        blueprint +
-        '\n\nهذا تصور نسختك كاملًا 👆 راجعه، ولو كل شيء تمام اضغط *تأكيد الطلب* — وأي تعديل اكتبه لي وأنا أظبطه فورًا.',
+      ok: true, data: { blueprint, ready: true },
+      userMessage: `${blueprint}\n\nهذا تصور نسختك كاملًا 👆 راجعه، ولو تمام اضغط *تأكيد الطلب* — وأي تعديل اكتبه لي وأظبطه فورًا.`,
     };
   },
 
-  /** تأكيد الطلب: حفظ + إرسال الملف الكامل لمدير المنصة + تحويل المحادثة */
   async confirm_launch_order(args, ctx) {
     const session = store.get(ctx.sessionKey);
     const profile = session.profile ?? {};
-
-    if (args.confirmed !== true) {
-      return { ok: false, data: { error: 'لم يؤكد العميل بعد — اعرض التصور واطلب التأكيد الصريح أولًا' } };
-    }
+    if (args.confirmed !== true) return { ok: false, data: { error: 'لم يؤكد العميل بعد' } };
     if (!isProfileReady(profile)) {
-      return {
-        ok: false,
-        data: { error: 'الملف ناقص', missing: missingRequired(profile), next_question: nextQuestion(profile) },
-      };
+      return { ok: false, data: { error: 'الملف ناقص', missing: missingRequired(profile), next_question: nextQuestion(profile) } };
     }
     if (session.launch?.status === 'confirmed' && session.launch.orderRef) {
       return { ok: true, data: { order_ref: session.launch.orderRef, duplicate: true } };
     }
-
     if (typeof args.notes === 'string' && args.notes.trim()) {
       store.patchProfile(ctx.sessionKey, { notes: args.notes.trim().slice(0, 500) });
     }
 
+    const finalProfile = store.get(ctx.sessionKey).profile ?? {};
     const orderRef = `ORD-${uid('').slice(-6).toUpperCase()}`;
-    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef, confirmedAt: Date.now() });
-
-    const record = {
-      ref: orderRef,
-      ...store.get(ctx.sessionKey).profile,
-      sessionKey: ctx.sessionKey,
-      customer_name_profile: ctx.customerName || null,
-      summary: orderSummaryLine(store.get(ctx.sessionKey).profile ?? {}, orderRef),
-      created_at: new Date().toISOString(),
-    };
-    await appendJsonFile('orders', record);
-    log.tool(`confirm_launch_order → ${orderRef} | ${record.summary}`);
-
-    const managerNote = managerOrderMessage(store.get(ctx.sessionKey).profile ?? {}, orderRef, ctx.sessionKey);
-
+    const summary = orderSummaryLine(finalProfile, orderRef);
+    const order = orderService.launchOrder({
+      contactKey: ctx.sessionKey,
+      summary,
+      payload: { ...finalProfile },
+      serviceSlug: finalProfile.preferred_plan ?? undefined,
+      totalAmount: getPlan((finalProfile.preferred_plan ?? 'pro') as 'starter' | 'pro' | 'enterprise').priceMonthly,
+      language: uiLang(ctx),
+    });
+    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: order.ref, confirmedAt: Date.now() });
+    bridge.patchCustomer(ctx.sessionKey, {
+      fullName: finalProfile.full_name, restaurantName: finalProfile.restaurant_name, city: finalProfile.city,
+      tables: finalProfile.tables, branches: finalProfile.branches, preferredPlan: finalProfile.preferred_plan,
+    });
+    log.tool(`confirm_launch_order → ${order.ref}`);
     return {
       ok: true,
-      data: { order_ref: orderRef, summary: record.summary },
+      data: { order_ref: order.ref, summary },
       userMessage:
-        `تم تأكيد طلبك ✅ رقم الطلب: *${orderRef}*\n` +
-        `ملفك الكامل وصل *مدير المنصة* — يتواصل معك ويجهز نسختك، خلال دقائق عادة وبدون بطاقة للبدء 🚀\n` +
+        `تم تأكيد طلبك ✅ رقم الطلب: *${order.ref}*\n` +
+        `ملفك الكامل وصل *مدير المنصة* ويتواصل معك لتجهيز نسختك خلال دقائق عادة، وبدون بطاقة للبدء 🚀\n` +
         `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.`,
-      sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef } },
+      sideEffect: { kind: 'handoff', payload: { reason: `طلب إطلاق مؤكد ${order.ref}` } },
     };
   },
 
-  // ─────────────────────── نظام الحجوزات (مواعيد التفعيل) ───────────────────────
+  // ───────── الحجوزات (عبر BookingService — منطق الأعمال هو المرجع) ─────────
 
-  /** قائمة المنتجات/الخدمات (الباقات) بالأسعار الرسمية */
-  get_menu() {
-    const lines = ['*باقاتنا الثلاث* — كلها بدون عقود وبدون رسوم مخفية:'];
-    for (const p of MUREEH_PLANS) {
-      lines.push(`• *${p.name}* — *${p.priceMonthly} ₪/شهر*${p.mostPopular ? ' ← الأكثر طلبًا' : ''}`);
+  check_availability(args, ctx) {
+    const date = typeof args.date === 'string' ? args.date.trim() : '';
+    const lang = uiLang(ctx);
+    if (date) {
+      const res = bookingService.daySlots(date);
+      if (!res.ok) return { ok: false, data: { date, reason: res.reason }, userMessage: `${res.reason}.` };
+      if (typeof args.time === 'string' && args.time.trim()) {
+        const s = bookingService.check(date, args.time.trim());
+        if (!s.ok) return { ok: false, data: { date, time: args.time, reason: s.reason }, userMessage: s.reason! };
+        return { ok: true, data: { date, time: args.time, available: true }, userMessage: lang === 'en' ? `Available ✅ ${date} at ${args.time}` : `متاح ✅ ${date} الساعة ${args.time}` };
+      }
+      const shown = res.slots.slice(0, 8);
+      return {
+        ok: true, data: { date, day: res.dayName, slots: res.slots },
+        userMessage: [
+          `مواعيد *${date}* (${res.dayName ?? ''}) المتاحة:`,
+          shown.map((s) => `• ${s}`).join('\n'),
+          res.slots.length > shown.length ? `وعندنا مواعيد ثانية — قل لي الوقت الأنسب.` : '',
+        ].filter(Boolean).join('\n'),
+      };
     }
-    lines.push('الدفع السنوي يوفّر شهرين كاملين مجانًا، ويمكن الترقية أو الإلغاء بأي وقت.');
-    log.tool('get_menu → 3 باقات');
+    const next = bookingService.nextDays(3);
+    if (next.length === 0) {
+      return { ok: false, data: { next: [] }, userMessage: 'لا توجد مواعيد متاحة ضمن المدى الحالي — بوصلك بالفريق يرتبونها معك مباشرة.' };
+    }
+    const lines = ['أقرب أيام متاحة للحجز:'];
+    for (const d of next) lines.push(`• ${d.date} (${d.dayName}): ${d.slots.join('، ')}`);
+    lines.push('أي تاريخ ووقت يناسبك؟');
+    return { ok: true, data: { next }, userMessage: lines.join('\n') };
+  },
+
+  create_booking(args, ctx) {
+    const lang = uiLang(ctx);
+    const serviceRef = args.service_id ?? args.service;
+    const idempotencyKey = `cb:${ctx.sessionKey}:${String(serviceRef ?? 'pro')}:${args.date}:${args.time}`;
+    try {
+      const { booking, service } = bookingService.create({
+        contactKey: ctx.sessionKey,
+        serviceRef: serviceRef ? String(serviceRef) : null,
+        date: String(args.date),
+        time: String(args.time),
+        fullName: typeof args.full_name === 'string' && args.full_name.trim() ? args.full_name.trim() : undefined,
+        notes: typeof args.notes === 'string' ? args.notes : undefined,
+        language: lang,
+        idempotencyKey,
+      });
+      const patch: Partial<RestaurantProfile> = {};
+      if (typeof args.full_name === 'string' && args.full_name.trim()) patch.full_name = args.full_name.trim().slice(0, 60);
+      if (typeof args.restaurant_name === 'string' && args.restaurant_name.trim()) patch.restaurant_name = args.restaurant_name.trim().slice(0, 80);
+      if (typeof args.city === 'string' && args.city.trim()) patch.city = args.city.trim().slice(0, 60);
+      if (typeof args.tables === 'number' && args.tables > 0) patch.tables = Math.round(args.tables);
+      if (Object.keys(patch).length) { store.patchProfile(ctx.sessionKey, patch); bridge.patchCustomer(ctx.sessionKey, patch as any); }
+      const svcName = service ? (lang === 'en' && service.name_en ? service.name_en : service.name_ar) : planName(booking.plan_slug);
+      log.tool(`create_booking → ${booking.ref}`);
+      return {
+        ok: true,
+        data: { ref: booking.ref, date: booking.slot_date, time: booking.slot_time, service: booking.plan_slug ?? service?.slug },
+        userMessage: lang === 'en'
+          ? `Booking confirmed ✅\nRef: *${booking.ref}*\n📅 ${booking.slot_date} at ${booking.slot_time}\n📦 ${svcName}\n\n${formatAvailabilityText('en') ? 'Our team will contact you at the appointment.' : ''}`
+          : `تم حجز موعدك ✅\nرقم الحجز: *${booking.ref}*\n📅 ${booking.slot_date} · الساعة ${booking.slot_time}\n📦 ${svcName}\n\nفريقنا يتواصل معك في الموعد، وتقدر تعدّل أو تلغي من «حجوزاتي».`,
+      };
+    } catch (err) {
+      return toolError(err, 'ما أقدر أحجز هالموعد');
+    }
+  },
+
+  update_booking(args, ctx) {
+    try {
+      const updated = bookingService.reschedule({
+        contactKey: ctx.sessionKey,
+        ref: typeof args.booking_ref === 'string' ? args.booking_ref : null,
+        date: typeof args.date === 'string' && args.date.trim() ? args.date.trim() : undefined as unknown as string,
+        time: typeof args.time === 'string' && args.time.trim() ? args.time.trim() : undefined as unknown as string,
+        serviceRef: typeof args.service === 'string' ? args.service : null,
+      });
+      const svcName = planName(updated.plan_slug);
+      log.tool(`update_booking → ${updated.ref}`);
+      return {
+        ok: true,
+        data: { ref: updated.ref, date: updated.slot_date, time: updated.slot_time },
+        userMessage: `ظبطت تعديلك ✅ الحجز *${updated.ref}* صار:\n📅 ${updated.slot_date} · الساعة ${updated.slot_time}\n📦 ${svcName}`,
+      };
+    } catch (err) {
+      return toolError(err, 'ما أقدر أنقل الحجز لهالموعد');
+    }
+  },
+
+  cancel_booking(args, ctx) {
+    try {
+      const cancelled = bookingService.cancel({
+        contactKey: ctx.sessionKey,
+        ref: typeof args.booking_ref === 'string' ? args.booking_ref : null,
+        reason: typeof args.reason === 'string' ? args.reason : null,
+      });
+      log.tool(`cancel_booking → ${cancelled.ref}`);
+      return {
+        ok: true,
+        data: { ref: cancelled.ref, status: cancelled.status },
+        userMessage: `تم إلغاء حجزك *${cancelled.ref}* (${cancelled.slot_date} — ${cancelled.slot_time}). حاب نحجز موعد بديل؟ أنا جاهز.`,
+      };
+    } catch (err) {
+      return toolError(err, 'تعذّر إلغاء الحجز');
+    }
+  },
+
+  get_customer_bookings(_args, ctx) {
+    const rows = bookingService.listFor(ctx.sessionKey);
+    const active = rows.filter((b) => b.status === 'PENDING' || b.status === 'CONFIRMED');
+    const lines = active.length
+      ? ['حجوزاتك النشطة:', ...active.map((b) => `• ${b.ref} — ${b.slot_date} ${b.slot_time} — ${planName(b.plan_slug)} (${bookingStatusLabelAr(b.status)})`)]
+      : ['لا توجد لديك حجوزات نشطة حاليًا.'];
+    const past = rows.filter((b) => b.status === 'COMPLETED' || b.status === 'CANCELLED' || b.status === 'NO_SHOW').slice(0, 5);
+    if (past.length) {
+      lines.push('', 'السابقة:');
+      for (const b of past) lines.push(`• ${b.ref} — ${b.slot_date} (${bookingStatusLabelAr(b.status)})`);
+    }
     return {
       ok: true,
-      data: {
-        services: MUREEH_PLANS.map((p) => ({
-          id: p.id,
-          name: p.name,
-          priceMonthly: p.priceMonthly,
-          priceYearly: p.priceYearly,
-        })),
-      },
+      data: { bookings: rows.map((b) => ({ ref: b.ref, date: b.slot_date, time: b.slot_time, status: b.status, service: b.plan_slug })) },
       userMessage: lines.join('\n'),
     };
   },
 
-  /** معلومات النشاط الرسمية (هوية + قنوات + ساعات عمل فريق الحجز) */
-  get_restaurant_info() {
-    const lines = [
-      '*منصة مُريح* — نظام إدارة مطاعم ومقاهٍ سحابي (منيو QR، شاشة مطبخ حية، كاشير، تحليلات).',
-      '💬 تيليجرام المبيعات والدعم: +972 599 891 559',
-      `⏰ ساعات عمل فريق الحجز والتفعيل: ${formatAvailabilityText()}`,
-      '🤖 هذا البوت يرد عليك 24/7، والمتابعة البشرية خلال ساعات العمل.',
-    ];
-    log.tool('get_restaurant_info');
-    return {
-      ok: true,
-      data: {
-        name: config.bot.BUSINESS_NAME,
-        channels: 'telegram +972599891559',
-        working_hours: formatAvailabilityText(),
-        timezone: availability().timezone,
-      },
-      userMessage: lines.join('\n'),
-    };
+  get_order_status(args, ctx) {
+    try {
+      const order = orderService.byRef(String(args.order_ref).trim(), ctx.sessionKey);
+      const label = {
+        PENDING: 'قيد المراجعة', CONFIRMED: 'مؤكّد', IN_PROGRESS: 'قيد التنفيذ',
+        COMPLETED: 'مكتمل', CANCELLED: 'ملغى',
+      }[order.status] ?? order.status;
+      return {
+        ok: true,
+        data: { ref: order.ref, status: order.status, summary: order.summary },
+        userMessage: `طلبك *${order.ref}* حالته: *${label}*.\n${order.summary}`,
+      };
+    } catch (err) {
+      return toolError(err, 'ما لقيت الطلب');
+    }
   },
 
-  /** بيانات العميل المحفوظة + حجوزاته النشطة */
   get_customer(_args, ctx) {
     const session = store.get(ctx.sessionKey);
     const p = session.profile ?? {};
-    const bookings = bookingStore.bySession(ctx.sessionKey).filter((b) => b.status === 'confirmed');
-
+    const bookings = bookingService.listFor(ctx.sessionKey).filter((b) => b.status === 'PENDING' || b.status === 'CONFIRMED');
+    const orders = orderService.listFor(ctx.sessionKey).slice(0, 5);
     const facts: string[] = [];
     if (p.full_name) facts.push(`الاسم: ${p.full_name}`);
     if (p.restaurant_name) facts.push(`المطعم: ${p.restaurant_name}`);
     if (p.city) facts.push(`المدينة: ${p.city}`);
     if (p.tables) facts.push(`الطاولات: ${p.tables}`);
-    if (p.preferred_plan) facts.push(`الباقة: ${serviceName(p.preferred_plan)}`);
-
-    const bLines = bookings.map((b) => `• ${b.ref} — ${b.date} ${b.time} — ${serviceName(b.service)}`);
-    log.tool(`get_customer → ${ctx.sessionKey} | حجوزات نشطة: ${bookings.length}`);
-
+    if (p.preferred_plan) facts.push(`الباقة: ${planName(p.preferred_plan)}`);
+    const bLines = bookings.map((b) => `• ${b.ref} — ${b.slot_date} ${b.slot_time} — ${planName(b.plan_slug)}`);
+    const oLines = orders.map((o) => `• ${o.ref} — ${o.status}`);
     return {
       ok: true,
       data: {
         profile: p,
-        active_bookings: bookings.map((b) => ({ ref: b.ref, date: b.date, time: b.time, service: b.service })),
+        active_bookings: bookings.map((b) => ({ ref: b.ref, date: b.slot_date, time: b.slot_time, status: b.status })),
+        orders: oLines,
       },
       userMessage: [
-        facts.length ? `بياناتك المسجلة عندي:\n${facts.join('\n')}` : 'لسا ما عندي تفاصيل كثيرة عنك — أول ما نكمّل الحجز بسجّلها.',
-        bookings.length
-          ? `حجوزاتك النشطة:\n${bLines.join('\n')}`
-          : 'ما عندك حجوزات نشطة حاليًا.',
-      ].join('\n\n'),
+        facts.length ? `بياناتك:\n${facts.join('\n')}` : 'لا توجد تفاصيل كثيرة مسجلة بعد.',
+        bookings.length ? `حجوزاتك النشطة:\n${bLines.join('\n')}` : 'لا حجوزات نشطة.',
+        orders.length ? `طلباتك:\n${oLines.join('\n')}` : '',
+      ].filter(Boolean).join('\n\n'),
     };
   },
 
-  /** التحقق من التوفر (فتحات فعلية بعد خصم الإشغال) */
-  check_availability(args) {
-    const date = typeof args.date === 'string' && args.date.trim() ? args.date.trim() : '';
-
-    // تاريخ محدد
-    if (date) {
-      const res = availableSlotsForDate(date);
-      if (!res.ok) {
-        return {
-          ok: false,
-          data: { date, day: res.dayName, reason: res.reason },
-          userMessage: `${res.reason}.`,
-        };
-      }
-      // فتحة محددة؟
-      if (typeof args.time === 'string' && args.time.trim()) {
-        const s = checkSlot(date, args.time.trim());
-        if (!s.ok) {
-          return { ok: false, data: { date, time: args.time, reason: s.reason }, userMessage: s.reason! };
-        }
-        return {
-          ok: true,
-          data: { date, day: res.dayName, time: args.time, available: true },
-          userMessage: `متاح ✅ ${date} الساعة ${args.time}`,
-        };
-      }
-      const shown = res.slots.slice(0, 8);
+  create_support_ticket(args, ctx) {
+    try {
+      const profile = store.get(ctx.sessionKey).profile;
+      const ticket = ticketService.open({
+        contactKey: ctx.sessionKey,
+        issue: String(args.issue ?? ''),
+        restaurantName: typeof args.restaurant_name === 'string' ? args.restaurant_name : profile?.restaurant_name,
+        plan: args.plan ?? profile?.preferred_plan ?? null,
+        priority: ['low', 'normal', 'high', 'urgent'].includes(args.priority) ? args.priority : 'normal',
+        language: uiLang(ctx),
+      });
+      const prioAr: Record<string, string> = { urgent: 'عاجلة (الخدمة متوقفة)', high: 'عالية', normal: 'عادية', low: 'منخفضة' };
+      log.tool(`create_support_ticket → ${ticket.ref}`);
       return {
         ok: true,
-        data: { date, day: res.dayName, slots: res.slots },
-        userMessage: [
-          `مواعيد *${date}* (${res.dayName}) المتاحة:`,
-          shown.map((s) => `• ${s}`).join('\n'),
-          res.slots.length > shown.length
-            ? `وعندنا ${res.slots.length - shown.length} مواعيد ثانية — قل لي الوقت اللي يناسبك وأتأكد لك.`
-            : '',
-        ]
-          .filter(Boolean)
-          .join('\n'),
+        data: { ref: ticket.ref, priority: ticket.priority, status: ticket.status },
+        userMessage: `فتحت لك متابعة فورية برقم *${ticket.ref}* (أولوية: ${prioAr[ticket.priority]}).\nزميل من الدعم يكمل معك قريبًا، وأنا آسف على الإزعاج — بنحلّها.`,
+        sideEffect: { kind: 'handoff', payload: { reason: `تذكرة دعم ${ticket.ref}` } },
       };
+    } catch (err) {
+      return toolError(err, 'تعذّر فتح التذكرة');
     }
-
-    // بدون تاريخ → أقرب أيام متاحة
-    const next = nextAvailableDays(3);
-    if (next.length === 0) {
-      return {
-        ok: false,
-        data: { next: [] },
-        userMessage: 'ما في مواعيد متاحة ضمن المدى الحالي — بوصلك بالفريق يرتبون لك مباشرة.',
-      };
-    }
-    const lines = ['أقرب أيام متاحة للحجز:'];
-    for (const d of next) lines.push(`• ${d.date} (${d.dayName}): ${d.slots.join('، ')}`);
-    return {
-      ok: true,
-      data: { next: next.map((d) => ({ date: d.date, day: d.dayName, slots: d.slots })) },
-      userMessage: lines.join('\n') + '\nأي تاريخ يناسبك؟',
-    };
   },
 
-  /** إنشاء حجز — لا نجاح إلا بعد التحقق من التوفر فعليًا */
-  create_booking(args, ctx) {
-    const service = ['starter', 'pro', 'enterprise'].includes(args.service) ? (args.service as PlanId) : '';
-    if (!service) return { ok: false, data: { error: 'الباقة (الخدمة) غير محددة' } };
-
-    const date = String(args.date ?? '').trim();
-    const time = String(args.time ?? '').trim();
-    if (!date || !time) {
-      return { ok: false, data: { error: 'التاريخ والوقت مطلوبان للحجز' } };
-    }
-
-    const slot = checkSlot(date, time);
-    if (!slot.ok) {
-      return {
-        ok: false,
-        data: { error: slot.reason },
-        userMessage: `ما أقدر أحجز هالموعد — ${slot.reason}. أعطني وقتًا ثاني أو خلّني أعرض لك المتاح.`,
-      };
-    }
-
-    const p = store.get(ctx.sessionKey).profile ?? {};
-    const booking = bookingStore.create({
-      service,
-      date,
-      time,
-      fullName: typeof args.full_name === 'string' && args.full_name.trim() ? args.full_name.trim().slice(0, 60) : p.full_name,
-      restaurantName: typeof args.restaurant_name === 'string' && args.restaurant_name.trim() ? args.restaurant_name.trim().slice(0, 80) : p.restaurant_name,
-      city: typeof args.city === 'string' && args.city.trim() ? args.city.trim().slice(0, 60) : p.city,
-      tables: typeof args.tables === 'number' && args.tables > 0 ? Math.round(args.tables) : p.tables,
-      contact: ctx.sessionKey,
-      notes: typeof args.notes === 'string' && args.notes.trim() ? args.notes.trim().slice(0, 300) : undefined,
+  handoff_to_human(args, ctx) {
+    const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim().slice(0, 300) : 'طلب العميل موظفًا بشريًا';
+    const session = store.get(ctx.sessionKey);
+    handoffService.request({
+      contactKey: ctx.sessionKey,
+      name: session.name,
+      reason,
+      summary: typeof args.summary === 'string' ? args.summary : session.summary,
+      lastMessage: session.messages.filter((m) => m.dir === 'in').slice(-1)[0]?.body ?? '',
     });
-
-    // ثبّت أي بيانات جديدة في ذاكرة العميل الدائمة حتى لا يُعاد السؤال عنها لاحقًا
-    const patch: Partial<RestaurantProfile> = {};
-    if (booking.fullName) patch.full_name = booking.fullName;
-    if (booking.restaurantName) patch.restaurant_name = booking.restaurantName;
-    if (booking.city) patch.city = booking.city;
-    if (booking.tables) patch.tables = booking.tables;
-    if (Object.keys(patch).length) store.patchProfile(ctx.sessionKey, patch);
-
-    const note =
-      `🗓️ *حجز تفعيل جديد* ${booking.ref}\n` +
-      `👤 ${booking.fullName ?? '—'}\n` +
-      `🍽️ ${booking.restaurantName ?? '—'}${booking.city ? ` — ${booking.city}` : ''}\n` +
-      `📦 ${serviceName(booking.service)}${booking.tables ? ` · ${booking.tables} طاولة` : ''}\n` +
-      `📅 ${booking.date} ${booking.time}\n` +
-      `💬 ${ctx.sessionKey}`;
-
+    log.tool(`handoff_to_human → ${ctx.sessionKey} (${reason})`);
     return {
       ok: true,
-      data: { ref: booking.ref, date: booking.date, time: booking.time, service: booking.service },
-      userMessage:
-        `تم حجز موعد التفعيل ✅\n` +
-        `رقم الحجز: *${booking.ref}*\n` +
-        `📅 ${booking.date} · الساعة ${booking.time}\n` +
-        `📦 ${serviceName(booking.service)}\n\n` +
-        `فريقنا يتواصل معك في الموعد على رقمك. ولو تغيّر عندك شي، تقدر تعدّل أو تلغي بأي وقت وأنا أظبطه لك.`,
-      sideEffect: { kind: 'notify_manager', payload: { note, orderRef: booking.ref } },
+      data: { handoff: true, reason },
+      userMessage: uiLang(ctx) === 'en'
+        ? 'Sure — connecting you with a teammate now 🙏 They’ll take over shortly.'
+        : 'حاضر، بوصلك بأحد الزملاء الحين 🙋 يكملون معك بأقرب وقت.',
+      sideEffect: { kind: 'handoff', payload: { reason } },
     };
   },
 
-  /** تعديل حجز — تحقق من التوفر الجديد ثم نفّذ */
-  update_booking(args, ctx) {
-    const ref = typeof args.booking_ref === 'string' && args.booking_ref.trim() ? args.booking_ref.trim().toUpperCase() : '';
-    const booking = ref ? bookingStore.byRef(ref) : bookingStore.latestActive(ctx.sessionKey);
-    if (!booking) {
-      return {
-        ok: false,
-        data: { error: 'لا يوجد حجز' },
-        userMessage: 'ما لقيت حجز مسجل عندك لأعدّله. تبيني أتحقق لك من المواعيد المتاحة وأحجز لك واحد جديد؟',
-      };
-    }
-    if (booking.status !== 'confirmed') {
-      return {
-        ok: false,
-        data: { error: 'الحجز ليس نشطًا' },
-        userMessage: 'هذا الحجز مو نشط (ملغى أو مكتمل). تبيني أجهز لك حجز جديد؟',
-      };
-    }
-
-    const newDate = typeof args.date === 'string' && args.date.trim() ? args.date.trim() : booking.date;
-    const newTime = typeof args.time === 'string' && args.time.trim() ? args.time.trim() : booking.time;
-    const newService = ['starter', 'pro', 'enterprise'].includes(args.service) ? (args.service as PlanId) : booking.service;
-
-    if (newDate !== booking.date || newTime !== booking.time) {
-      const slot = checkSlot(newDate, newTime, booking.ref);
-      if (!slot.ok) {
-        const alt = availableSlotsForDate(newDate);
-        const suggestion = alt.ok && alt.slots.length ? ` أقرب بديل في ${newDate}: ${alt.slots.slice(0, 3).join('، ')}` : '';
-        return {
-          ok: false,
-          data: { error: slot.reason },
-          userMessage: `ما أقدر أنقل الحجز لهالموعد — ${slot.reason}.${suggestion}`,
-        };
-      }
-    }
-
-    const updated = bookingStore.update(booking.ref, {
-      service: newService,
-      date: newDate,
-      time: newTime,
-      notes: typeof args.notes === 'string' && args.notes.trim() ? args.notes.trim().slice(0, 300) : booking.notes,
-    });
-    if (!updated) {
-      return { ok: false, data: { error: 'تعذّر التحديث' }, userMessage: 'صار خطأ مؤقت بالتعديل — بوصلك بالفريق يظبطونه لك.' };
-    }
-
-    const note =
-      `✏️ *تعديل حجز* ${updated.ref}\n` +
-      `👤 ${updated.fullName ?? '—'}\n` +
-      `📅 ${updated.date} ${updated.time}\n` +
-      `📦 ${serviceName(updated.service)}`;
-    return {
-      ok: true,
-      data: { ref: updated.ref, date: updated.date, time: updated.time, service: updated.service },
-      userMessage:
-        `ظبطت تعديلك ✅ الحجز *${updated.ref}* صار:\n` +
-        `📅 ${updated.date} · الساعة ${updated.time}\n` +
-        `📦 ${serviceName(updated.service)}`,
-      sideEffect: { kind: 'notify_manager', payload: { note, orderRef: updated.ref } },
-    };
-  },
-
-  /** إلغاء حجز — لا «تم الإلغاء» إلا بعد النجاح */
-  cancel_booking(args, ctx) {
-    const ref = typeof args.booking_ref === 'string' && args.booking_ref.trim() ? args.booking_ref.trim().toUpperCase() : '';
-    const booking = ref ? bookingStore.byRef(ref) : bookingStore.latestActive(ctx.sessionKey);
-    if (!booking) {
-      return { ok: false, data: { error: 'لا يوجد حجز' }, userMessage: 'ما لقيت حجز مسجل عندك للإلغاء.' };
-    }
-    if (booking.status !== 'confirmed') {
-      return {
-        ok: true,
-        data: { ref: booking.ref, already: booking.status },
-        userMessage: `حجزك *${booking.ref}* مو نشط أصلًا (حالته: ${booking.status === 'cancelled' ? 'ملغى' : 'مكتمل'}).`,
-      };
-    }
-
-    const reason = typeof args.reason === 'string' && args.reason.trim() ? args.reason.trim().slice(0, 200) : undefined;
-    const cancelled = bookingStore.cancel(booking.ref, reason);
-    if (!cancelled) {
-      return { ok: false, data: { error: 'تعذّر الإلغاء' }, userMessage: 'صار خطأ مؤقت بالإلغاء — بوصلك بالفريق يتأكدون منه.' };
-    }
-
-    const note =
-      `❌ *إلغاء حجز* ${cancelled.ref}\n` +
-      `👤 ${cancelled.fullName ?? '—'}\n` +
-      `📅 ${cancelled.date} ${cancelled.time}${reason ? `\n📝 السبب: ${reason}` : ''}`;
-    return {
-      ok: true,
-      data: { ref: cancelled.ref, status: 'cancelled' },
-      userMessage:
-        `تم إلغاء حجزك *${cancelled.ref}* (${cancelled.date} — ${cancelled.time}). لو حاب نحجز لك موعد بديل، أنا جاهز.`,
-      sideEffect: { kind: 'notify_manager', payload: { note, orderRef: cancelled.ref } },
-    };
-  },
-
-  /** تنبيه داخلي للموظف/المدير (لا يظهر نصه للعميل) */
   send_notification(args) {
     const message = String(args.message ?? '').trim();
-    if (!message) return { ok: false, data: { error: 'نص التنبيه مطلوب' } };
     const to = args.to === 'manager' ? 'manager' : 'human';
-    const priority = ['low', 'normal', 'high', 'urgent'].includes(args.priority) ? args.priority : 'normal';
-    const note = `🔔 تنبيه${priority !== 'normal' ? ` [${priority}]` : ''}: ${message}`;
+    const priority = ['low', 'normal', 'high', 'urgent'].includes(args.priority) ? String(args.priority) : 'normal';
+    notifications.staffAlert(to, `🔔 [${priority}] ${message}`);
     log.tool(`send_notification → ${to} [${priority}]`);
-    return {
-      ok: true,
-      data: { sent: true, to, priority },
-      sideEffect: { kind: to === 'manager' ? 'notify_manager' : 'notify_human', payload: { note } },
-    };
+    return { ok: true, data: { sent: true, to, priority } };
   },
 
+  /** متوافق خلفي فقط — غير معروض للنموذج؛ يبقى لتسجيل ليد من تكاملات قديمة */
+  async capture_subscription_lead(args, ctx) {
+    const lead = {
+      ref: `SUB-${uid('').slice(-6).toUpperCase()}`,
+      full_name: String(args.full_name ?? 'غير مذكور'),
+      restaurant_name: String(args.restaurant_name ?? 'غير مذكور'),
+      city: String(args.city ?? 'غير مذكورة'),
+      tables: args.tables ?? null,
+      preferred_plan: String(args.preferred_plan ?? 'غير محددة'),
+      sessionKey: ctx.sessionKey,
+      created_at: new Date().toISOString(),
+    };
+    await appendJsonFile('leads', lead);
+    store.patchProfile(ctx.sessionKey, {
+      full_name: lead.full_name !== 'غير مذكور' ? lead.full_name : undefined,
+      restaurant_name: lead.restaurant_name !== 'غير مذكور' ? lead.restaurant_name : undefined,
+      city: lead.city !== 'غير مذكورة' ? lead.city : undefined,
+      tables: typeof lead.tables === 'number' && lead.tables > 0 ? lead.tables : undefined,
+      preferred_plan: ['starter', 'pro', 'enterprise'].includes(lead.preferred_plan) ? lead.preferred_plan as RestaurantProfile['preferred_plan'] : undefined,
+    });
+    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: lead.ref, confirmedAt: Date.now() });
+    return { ok: true, data: lead, userMessage: `سجّلت طلبك ✅ الرقم: *${lead.ref}* — الفريق يتواصل معك الآن.` };
+  },
 };
 
-/** تنفيذ دالة بأمان مع التقاط أي خطأ */
-export async function runTool(
-  name: string,
-  args: Record<string, any>,
-  ctx: ToolContext,
-): Promise<ToolResult> {
+/** تحويل موحّد لأخطاء الخدمات إلى ToolResult ودية */
+function toolError(err: unknown, prefix: string): ToolResult {
+  if (err instanceof ServiceError) {
+    const suffix =
+      err.code === 'unavailable' ? err.message
+      : err.code === 'forbidden' ? 'لا تملك صلاحية على هذا العنصر.'
+      : err.code === 'not_found' ? 'ما لقيت العنصر المطلوب.'
+      : err.message;
+    return { ok: false, data: { error: err.code, detail: err.message }, userMessage: `${prefix} — ${suffix}` };
+  }
+  const message = (err as Error).message ?? String(err);
+  return { ok: false, data: { error: message }, userMessage: `${prefix} — صارت مشكلة مؤقتة، بوصلك بالفريق يظبطونها لك.` };
+}
+
+async function appendJsonFile(name: 'leads' | 'tickets' | 'orders', record: Record<string, unknown>): Promise<void> {
+  const file = path.join(config.paths.DATA_DIR, `${name}.json`);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  let all: Record<string, unknown>[] = [];
+  try {
+    const parsed = JSON.parse(await fs.readFile(file, 'utf8'));
+    if (Array.isArray(parsed)) all = parsed;
+  } catch { /* أول تسجيل */ }
+  all.push(record);
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(all, null, 2), 'utf8');
+  await fs.rename(tmp, file);
+}
+
+/** نقطة التنفيذ الموحّدة الآمنة (تستخدمها حلقة النموذج والسكربتات) */
+export async function runTool(name: string, args: Record<string, any>, ctx: ToolContext): Promise<ToolResult> {
   if (!config.bot.TOOLS_ENABLED) {
     return { ok: false, data: { error: 'الأدوات معطّلة في الإعدادات' } };
   }
-
-  const handler = TOOL_HANDLERS[name];
-  if (!handler) {
-    return { ok: false, data: { error: `دالة غير معروفة: ${name}` } };
-  }
-
-  try {
-    return await handler(args ?? {}, ctx);
-  } catch (err) {
-    log.error(`فشل تنفيذ الأداة ${name}: ${(err as Error).message}`);
-    return { ok: false, data: { error: (err as Error).message } };
-  }
+  return executeTool(name, args, ctx, HANDLERS);
 }
 
-/** أسماء الأدوات المتاحة (للسجلات ولوحة التحكم) */
-export const TOOL_NAMES = Object.keys(TOOL_HANDLERS);
+export const TOOL_HANDLERS = HANDLERS;
+export { TOOL_SPECS };
+export const TOOL_NAMES = Object.keys(HANDLERS);
+
+// DAY_NAMES مستخدمة في اختبارات/سكربتات محتملة
+export { DAY_NAMES };

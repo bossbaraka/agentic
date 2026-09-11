@@ -24,6 +24,9 @@ import {
   typingDelayMs,
   type QuickReply,
 } from './personality.js';
+import { bridge } from '../services/conversationBridge.js';
+import { handoffService } from '../services/handoffService.js';
+import { recordMetric } from '../db/repos/system.js';
 import type {
   AgentResult,
   ConversationState,
@@ -90,6 +93,8 @@ export class AgentOrchestrator {
     if (msg.telegramUsername) {
       store.patchProfile(key, { telegram_username: msg.telegramUsername });
     }
+    // مزامنة المستخدم/المحادثة/الرسالة مع قاعدة البيانات العلائقية (دفاعية، لا تكسر المسار)
+    bridge.inbound(msg);
     const session = store.get(key);
     if (!session.profile?.full_name && usableContactName(msg.contactName, key)) {
       store.patchProfile(key, { full_name: msg.contactName.trim() });
@@ -309,6 +314,8 @@ export class AgentOrchestrator {
               sessionKey: key,
               customerName: session.name,
               replyTo: batch[batch.length - 1]?.waId,
+              channel: batch[batch.length - 1]?.channel ?? (key.startsWith('tg:') ? 'tg' : 'wa'),
+              language: session.language as 'ar' | 'en' | 'he',
             },
             extraContext,
           });
@@ -370,6 +377,7 @@ export class AgentOrchestrator {
           latencyMs: latency,
           error: result.degraded === true,
         });
+        recordMetric('llm_latency_ms', { refKey: key, value: latency });
 
         // وضع احتياطي؟ العميل حصل على رد مفيد — لكن صاحبه يجب أن يعرف السبب ويصلحه
         if (result.degraded) {
@@ -424,12 +432,22 @@ export class AgentOrchestrator {
             },
           };
           store.addOutbound(key, rec);
+          bridge.outbound(key, part, { externalId: sent.messageId, meta: { intent: result.intent, engine: result.engine } });
           this.emit({ t: 'outbound', sessionKey: key, name: session.name, message: rec, state: session.state });
 
         }
 
         // الإجراءات الجانبية
         for (const se of result.sideEffects) {
+          if (se.kind === 'handoff') {
+            const reason = typeof se.payload?.reason === 'string' ? (se.payload.reason as string) : 'طلب النظام التحويل لبشري';
+            store.setState(key, 'human', `🙋 ${reason}`);
+            store.recordHandoff(key);
+            this.emit({ t: 'status', sessionKey: key, state: 'human', note: reason });
+            // التنبيه وضبط حالة قاعدة البيانات نفّذتهما الأداة (handoff_to_human/التذكرة) أصلًا
+            log.warn(`🙋 ${key} → تحويل لبشري عبر أداة (${reason})`);
+            continue;
+          }
           if (se.kind === 'notify_manager') {
             const note = typeof se.payload?.note === 'string' ? (se.payload.note as string) : '';
             const ref = typeof se.payload?.orderRef === 'string' ? (se.payload.orderRef as string) : undefined;
@@ -465,6 +483,13 @@ export class AgentOrchestrator {
           } else {
             store.setState(key, 'human', `🚨 تحويل تلقائي لبشري: ${result.reason ?? 'طلب النموذج'}`);
             store.recordHandoff(key);
+            handoffService.request({
+              contactKey: key,
+              name: session.name,
+              reason: result.reason ?? 'تحويل تلقائي (النموذج)',
+              lastMessage: batch.map((b) => b.body).join('\n'),
+            });
+            bridge.setState(key, 'human', result.reason);
             this.emit({ t: 'status', sessionKey: key, state: 'human', note: result.reason });
             await notifyHuman(key, session.name, batch.map((b) => b.body).join('\n'), result.reason);
             log.warn(`🚨 ${key} → تحويل لموظف بشري (${result.reason ?? 'بدون سبب'})`);
@@ -480,7 +505,10 @@ export class AgentOrchestrator {
 
         // تحديث اللغة المكتشفة (تقريبًا من نص الرسالة)
         const lang = detectLanguage(batch.map((b) => b.body).join(' '));
-        if (lang) store.setLanguage(key, lang);
+        if (lang) {
+          store.setLanguage(key, lang);
+          bridge.setLanguage(key, lang as 'ar' | 'en' | 'he');
+        }
       });
     } finally {
       this.busy.delete(key);
@@ -589,6 +617,7 @@ export class AgentOrchestrator {
         meta: { source: 'command' },
       };
       store.addOutbound(key, rec);
+      bridge.outbound(key, text, { externalId: res.messageId, meta: { source: 'command' } });
       this.emit({ t: 'outbound', sessionKey: key, name: store.get(key).name, message: rec, state: store.get(key).state });
     }
     return res.ok;
@@ -609,6 +638,7 @@ export class AgentOrchestrator {
     switch (cmd) {
       case 'bot': {
         store.setState(key, 'bot', '🤖 تم إرجاع المحادثة للرد الآلي');
+        bridge.setState(key, 'bot', 'إرجاع للرد الآلي');
         this.emit({ t: 'status', sessionKey: key, state: 'bot' });
         await this.replyAndRecord(key, `رجعت معك ✅ أنا ${config.bot.BOT_NAME}. تفضل، وش تحتاج الحين؟`, {
           phoneNumberId: msg.phoneNumberId,
@@ -620,6 +650,8 @@ export class AgentOrchestrator {
       case 'human': {
         store.setState(key, 'human', '🙋 طلب العميل التحدث مع موظف بشري');
         store.recordHandoff(key);
+        handoffService.request({ contactKey: key, name: session.name, reason: 'أمر /بشري من العميل', lastMessage: msg.body });
+        bridge.setState(key, 'human', 'أمر /بشري من العميل');
         this.emit({ t: 'status', sessionKey: key, state: 'human' });
         await this.replyAndRecord(
           key,
@@ -632,6 +664,7 @@ export class AgentOrchestrator {
 
       case 'pause': {
         store.setState(key, 'paused', '⏸️ إيقاف مؤقت للرد الآلي');
+        bridge.setState(key, 'paused', 'إيقاف مؤقت');
         this.emit({ t: 'status', sessionKey: key, state: 'paused' });
         await this.replyAndRecord(key, 'تمام، سكتّ الحين ⏸️ اكتب */بوت* لو تبي أرجع، أو */استلام* لمتابعة بشرية.', {
           phoneNumberId: msg.phoneNumberId,
@@ -641,6 +674,7 @@ export class AgentOrchestrator {
 
       case 'resume': {
         store.setState(key, 'human', '🙋 متابعة بشرية');
+        bridge.setState(key, 'human', 'متابعة بشرية');
         this.emit({ t: 'status', sessionKey: key, state: 'human' });
         await this.replyAndRecord(key, 'أنا معك الآن 👋 اكتب */بوت* لو تبي أرجع للرد الآلي.', {
           phoneNumberId: msg.phoneNumberId,
@@ -650,6 +684,7 @@ export class AgentOrchestrator {
 
       case 'reset': {
         store.delete(key);
+        bridge.setState(key, 'bot', 'تصفير المحادثة');
         store.addSystem(key, '🔄 تم تصفير المحادثة بطلب العميل');
         this.emit({ t: 'status', sessionKey: key, state: 'bot', note: 'تصفير' });
         await this.replyAndRecord(key, 'صفحة جديدة، خلّينا نبدأ من الصفر ✨ كيف أقدر أساعد مطعمك؟', { phoneNumberId: msg.phoneNumberId });
@@ -690,8 +725,10 @@ export class AgentOrchestrator {
         id: uid('out'), waId: ok.messageId, dir: 'out', type: 'text',
         body: text, createdAt: Date.now(), meta: { manual: true },
       });
+      bridge.outbound(key, text, { externalId: ok.messageId, meta: { source: 'staff_manual' } });
       if (takeOver) {
         store.setState(key, 'human', '🙋 موظف بشري يكتب في المحادثة');
+        bridge.setState(key, 'human', 'رد يدوي من الموظف');
         this.emit({ t: 'status', sessionKey: key, state: 'human' });
       }
       this.emit({

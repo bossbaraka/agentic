@@ -9,16 +9,24 @@ import { log, truncate } from './lib/utils.js';
 import { orchestrator, writeInsightLog } from './agent/agent.js';
 import { parseStatuses, parseWebhookPayload } from './whatsapp/incoming.js';
 import type { WebhookPayload } from './whatsapp/types.js';
-import { parseTelegramUpdate } from './telegram/incoming.js';
 import {
   deleteTelegramWebhook,
   setTelegramWebhook,
   startTelegramPolling,
   stopTelegramPolling,
   telegramEnabled,
-  tgAnswerCallback,
+  tgSetMyCommands,
   verifyTelegramSecret,
 } from './telegram/client.js';
+import { dispatchTelegramUpdate } from './telegram/dispatcher.js';
+import { openDb, closeDb, dbHealth } from './db/client.js';
+import { seedAll } from './db/seed.js';
+import { importLegacyState } from './db/legacyImport.js';
+import { notifications } from './services/notificationService.js';
+import { countUsers } from './db/repos/users.js';
+import { bookingCounts } from './db/repos/bookings.js';
+import { listOrdersAdmin, listTicketsAdmin } from './db/repos/commerce.js';
+import { get as dbGet } from './db/client.js';
 import { getDashboardHtml } from './dashboard/index.js';
 import { startKeepAlive, stopKeepAlive } from './lib/keepalive.js';
 
@@ -111,6 +119,8 @@ app.get('/health', async () => ({
     whatsapp: config.whatsapp.ENABLED,
     telegram: config.telegram.TOKEN ? (config.telegram.WEBHOOK_URL ? 'webhook' : 'polling') : 'off',
   },
+  database: dbHealth(),
+  notifications: { enabled: config.notifications.ENABLED, queueDepth: notifications.pending() },
   ...orchestrator.status(),
   stats: store.snapshot(),
 }));
@@ -185,7 +195,11 @@ app.post(config.server.WEBHOOK_PATH, async (req, reply) => {
 /** webhook تيليجرام (يستخدم فقط مع TELEGRAM_WEBHOOK_URL) */
 if (telegramEnabled()) {
   app.post('/telegram/webhook', async (req, reply) => {
-    if (!verifyTelegramSecret((req.query as Record<string, string>)?.secret_token)) {
+    // تيليجرام يضع secret_token في ترويسة مخصصة (ندعم query أيضًا للتوافق مع الاختبار)
+    const secret =
+      (req.headers['x-telegram-bot-api-secret-token'] as string | undefined) ??
+      (req.query as Record<string, string>)?.secret_token;
+    if (!verifyTelegramSecret(secret)) {
       log.error('⛔ توقيع تيليجرام غير صالح — رفض الطلب');
       return reply.code(401).send({ error: 'invalid secret' });
     }
@@ -193,11 +207,7 @@ if (telegramEnabled()) {
     reply.code(200).send({ ok: true });
     setImmediate(async () => {
       try {
-        const body = req.body as any;
-        if (body?.callback_query?.id) void tgAnswerCallback(String(body.callback_query.id));
-        const msg = parseTelegramUpdate(body);
-        if (msg) await orchestrator.handleInbound(msg);
-        else log.warn('تحديث تيليجرام غير مدعوم — تم تجاهله');
+        await dispatchTelegramUpdate(req.body as any);
       } catch (err) {
         log.error(`خطأ في معالجة webhook تيليجرام: ${(err as Error).stack ?? err}`);
       }
@@ -218,10 +228,7 @@ app.post('/internal/simulate', async (req, reply) => {
 
   // محاكاة تيليجرام: { channel: 'tg', update: {...} }
   if (body?.channel === 'tg' || body?.channel === 'telegram') {
-    const update = body.update ?? body;
-    const msg = parseTelegramUpdate(update);
-    if (!msg) return reply.code(400).send({ error: 'تحديث تيليجرام غير صالح' });
-    await orchestrator.handleInbound(msg);
+    await dispatchTelegramUpdate(body.update ?? body);
     return { ok: true, channel: 'tg', received: 1 };
   }
 
@@ -253,11 +260,31 @@ app.get(config.server.DASHBOARD_PATH, async (req, reply) => {
   return reply.type('text/html; charset=utf-8').send(getDashboardHtml());
 });
 
+/** مؤشرات قاعدة البيانات العلائقية للوحة التحكم (دفاعي — لا يكشف بيانات عملاء) */
+function dbOverview() {
+  try {
+    const ticketsOpen = Number(
+      dbGet<{ n: number }>("SELECT COUNT(*) AS n FROM support_tickets WHERE status IN ('OPEN','IN_PROGRESS')")?.n ?? 0,
+    );
+    return {
+      users: countUsers(),
+      bookings: bookingCounts(),
+      orders: listOrdersAdmin({ limit: 1 }).total,
+      ticketsOpen,
+      notificationsPending: notifications.pending(),
+      notificationsFailed: notifications.failed(100).length,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** API للوحة التحكم */
 app.get('/api/sessions', async (req, reply) => {
   if (!dashboardAuthed(req as any)) return reply.code(401).send({ error: 'unauthorized' });
   return {
     stats: store.snapshot(),
+    db: dbOverview(),
     sessions: store.all().slice(0, 100).map((s) => ({
       key: s.key,
       name: s.name,
@@ -354,6 +381,14 @@ async function main() {
   await store.init();
   knowledge.reload();
 
+  // ───── قاعدة البيانات العلائقية: فتح + ترحيل + بذر ─────
+  openDb(config.db.PATH || undefined);
+  seedAll();
+  if (config.db.IMPORT_LEGACY) {
+    try { importLegacyState(); } catch (err) { log.warn(`استيراد الحالة القديمة: ${(err as Error).message}`); }
+  }
+  if (config.notifications.ENABLED) notifications.start();
+
   const check = validateConfig();
   for (const w of check.warnings) log.warn(w);
   for (const e of check.errors) log.error(e);
@@ -377,13 +412,10 @@ async function main() {
       await setTelegramWebhook(config.telegram.WEBHOOK_URL, config.telegram.WEBHOOK_SECRET)
         .catch((e: Error) => log.warn(`تعذّر ضبط webhook تيليجرام: ${e.message}`));
     } else {
-      startTelegramPolling((u) => {
-        if (u?.callback_query?.id) void tgAnswerCallback(String(u.callback_query.id));
-        const msg = parseTelegramUpdate(u);
-        if (msg) void orchestrator.handleInbound(msg);
-        else log.warn('تحديث تيليجرام غير مدعوم — تم تجاهله');
-      });
+      startTelegramPolling((u) => { void dispatchTelegramUpdate(u); });
     }
+    // قائمة الأوامر الرسمية للبوت (تظهر في زر القائمة بجانب حقل الإدخال)
+    await tgSetMyCommands().catch((e: Error) => log.warn(`setMyCommands: ${e.message}`));
   } else if (config.telegram.TOKEN) {
     log.info('🟢 تيليجرام: توكن مضبوط لكن DEMO_MODE=true — الإرسال الحقيقي يبدأ عند DEMO_MODE=false');
   }
@@ -427,8 +459,10 @@ for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     log.warn(`إشارة ${sig} — حفظ البيانات وإغلاق...`);
     stopKeepAlive();
     stopTelegramPolling();
+    notifications.stop();
     if (config.telegram.TOKEN && !config.env.DEMO_MODE) void deleteTelegramWebhook();
     store.close();
+    closeDb();
     app.close().then(() => process.exit(0)).catch(() => process.exit(0));
   });
 }

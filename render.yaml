@@ -2,8 +2,12 @@ services:
   - type: web
     name: mureeh-ai-agent
     env: node
+    # Node 22 مطلوب لقاعدة البيانات المدمجة node:sqlite
+    nodeVersion: 22.11.0
     region: singapore
     plan: free
+    # ⚠️ باقة Render المجانية بلا قرص دائم: تُفقد قاعدة SQLite عند كل نشر.
+    # على باقة مدفوعة أضف disk: { name: data, mountPath: /app/data, sizeGB: 1 }
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /health

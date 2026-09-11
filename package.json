@@ -1,11 +1,11 @@
 {
-  "name": "whatsapp-ai-agent",
-  "version": "1.0.0",
+  "name": "mureeh-agent",
+  "version": "1.1.0",
   "private": true,
-  "description": "بوت واتساب تفاعلي يعمل بـ Gemini عبر WhatsApp Cloud API الرسمي",
+  "description": "MUREEH | مُريح — وكيل ذكي ثنائي القناة (تيليجرام/واتساب) مع محرك حجوزات وكاتالوج ديناميكي وRBAC",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5.0"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -14,7 +14,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "demo": "tsx src/demo/simulate.ts",
     "tunnel": "bash scripts/tunnel.sh",
-    "test": "tsx scripts/test-flow.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "test:flow": "tsx scripts/test-flow.ts",
+    "test:smoke": "tsx scripts/smoke-menu.ts",
     "prestart": "node -e \"import('fs').then(fs => fs.mkdirSync('data',{recursive:true}))\""
   },
   "dependencies": {
@@ -27,7 +29,7 @@
     "tsx": "^4.19.0"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^22.9.0",
     "@types/ws": "^8.5.10",
     "typescript": "^5.6.0"
   }

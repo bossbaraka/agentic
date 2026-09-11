@@ -199,6 +199,33 @@ export const config = {
     /** أقصى حجم وسائط يتم تنزيله وفهمه (بايت) */
     MAX_MEDIA_BYTES: num('MAX_MEDIA_BYTES', 8 * 1024 * 1024),
   },
+
+  /**
+   * قاعدة البيانات العلائقية (SQLite عبر node:sqlite المدمج في Node 22+).
+   * المسار الافتراضي داخل DATA_DIR ليُحفظ على volume دائم في Docker/Render.
+   */
+  db: {
+    PATH: str('DB_PATH', ''),
+    /** استيراد لمرة واحدة من ملفات JSON القديمة (bookings/tickets/orders) */
+    IMPORT_LEGACY: bool('DB_IMPORT_LEGACY', true),
+  },
+
+  /** إدارة الموظفين والأدوار (RBAC) */
+  admin: {
+    /** معرّفات تيليجرام للمشرفين الأعلى (افصل بفواصل) — يُزرعون SUPER_ADMIN */
+    TELEGRAM_IDS: list('ADMIN_TELEGRAM_IDS', []),
+  },
+
+  /** نظام الإشعارات (طابور داخل العملية + تذكيرات المواعيد) */
+  notifications: {
+    ENABLED: bool('NOTIFICATIONS_ENABLED', true),
+    /** كم مرة يفحص العامل الإشعارات المستحقة (مللي ثانية) */
+    WORKER_INTERVAL_MS: num('NOTIFICATIONS_WORKER_INTERVAL_MS', 5000),
+    /** أقصى عدد محاولات تسليم قبل اعتبار الإشعار FAILED */
+    MAX_ATTEMPTS: num('NOTIFICATIONS_MAX_ATTEMPTS', 5),
+    /** ساعات التذكير قبل الموعد (مثلاً 24 ثم 1) */
+    REMINDER_HOURS: list('BOOKING_REMINDER_HOURS', ['24', '1']).map((h) => Number(h)).filter((h) => Number.isFinite(h) && h > 0),
+  },
 } as const;
 
 export type AppConfig = typeof config;
@@ -237,6 +264,9 @@ export function validateConfig(): { ok: boolean; warnings: string[]; errors: str
   if (!config.telegram.MANAGER_CHAT_ID && !config.telegram.HUMAN_CHAT_ID) {
     warnings.push('⚠️ TELEGRAM_MANAGER_CHAT_ID غير مضبوط — لن تصل إشعارات الطلبات المؤكدة لتيليجرام المدير.');
   }
+  if (config.telegram.WEBHOOK_URL && !config.telegram.WEBHOOK_SECRET && !demo) {
+    warnings.push('⛔ TELEGRAM_WEBHOOK_URL مضبوط بلا TELEGRAM_WEBHOOK_SECRET — أي طرف يمكنه تزوير التحديثات. ولّد سرًا: openssl rand -hex 32');
+  }
 
   if (!config.whatsapp.ENABLED) {
     warnings.push('⏸ واتساب موقوف (WHATSAPP_ENABLED=false) — البوت يعمل عبر تيليجرام فقط.');
@@ -266,6 +296,16 @@ export function validateConfig(): { ok: boolean; warnings: string[]; errors: str
 
   if (config.bot.MODE !== 'business' && config.bot.MODE !== 'assistant' && config.bot.MODE !== 'hybrid') {
     warnings.push(`BOT_MODE="${config.bot.MODE}" غير معروف — تم اعتماده كـ hybrid.`);
+  }
+
+  if (!process.versions.node || Number(process.versions.node.split('.')[0]) < 22) {
+    warnings.push(
+      `⚠️ إصدار Node الحالي ${process.versions.node} لا يضم node:sqlite — قاعدة البيانات العلائقية تتطلب Node 22+ (صورة Docker محدّثة).`,
+    );
+  }
+
+  if (config.admin.TELEGRAM_IDS.length === 0) {
+    warnings.push('ADMIN_TELEGRAM_IDS غير مضبوط — لا يوجد مشرف أعلى عبر تيليجرام (تبقى لوحة التحكم بكلمة المرور).');
   }
 
   return { ok: errors.length === 0, warnings, errors };
