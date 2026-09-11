@@ -5,6 +5,8 @@
  * التفاعل الذكي، والأزرار السريعة.
  */
 
+import type { RestaurantProfile } from '../types.js';
+
 export interface QuickReply {
   id: string;
   title: string;
@@ -90,10 +92,21 @@ export function clampButtons(buttons: QuickReply[] | undefined | null): QuickRep
 }
 
 /** أزرار احتياطية ذكية حسب النية — إذا النموذج نسي quick_replies */
-export function fallbackQuickReplies(intent?: string): QuickReply[] {
+/** أزرار احتياطية ذكية حسب النية ومعرفة العميل — إذا النموذج نسي quick_replies */
+export function fallbackQuickReplies(intent?: string, profile?: RestaurantProfile): QuickReply[] {
+  // إذا تم اختيار الباقة أو تأكيد الطلب، فلا داعي لأزرار الأسعار واقتراح الباقة العامة
+  const hasPlan = Boolean(profile?.preferred_plan);
+  const hasTables = Boolean(profile?.tables && profile.tables > 0);
+
   switch (intent) {
     case 'تحية':
     case 'عام':
+      if (hasPlan || hasTables) {
+        return [
+          { id: 'qr:activate', title: 'أكمل التفعيل' },
+          { id: 'qr:human', title: 'أريد موظف' },
+        ];
+      }
       return [
         { id: 'qr:prices', title: 'الأسعار والباقات' },
         { id: 'qr:recommend', title: 'أنصحني بباقة' },
@@ -114,12 +127,25 @@ export function fallbackQuickReplies(intent?: string): QuickReply[] {
       ];
     case 'اعتراض_سعري':
     case 'مقارنة_وضع_حالي':
+      if (hasPlan || hasTables) {
+        return [
+          { id: 'qr:starter', title: 'الأساسية 300₪' },
+          { id: 'qr:activate', title: 'أبدأ التفعيل' },
+          { id: 'qr:human', title: 'أريد موظف' },
+        ];
+      }
       return [
         { id: 'qr:recommend', title: 'أنصحني بباقة' },
         { id: 'qr:prices', title: 'الأسعار والباقات' },
         { id: 'qr:activate', title: 'أبدأ التفعيل' },
       ];
     case 'طلب_تفعيل':
+      if (hasPlan) {
+        return [
+          { id: 'qr:confirm', title: 'تأكيد الطلب' },
+          { id: 'qr:edit', title: 'تعديل' },
+        ];
+      }
       return [
         { id: 'qr:pro', title: 'الاحترافية' },
         { id: 'qr:starter', title: 'الأساسية' },
@@ -182,19 +208,31 @@ function buttonKeywords(b: QuickReply): string[] {
  * ضمان اتساق الأزرار مع المكتوب — الأزرار امتداد للجملة الأخيرة فقط:
  * 1. تحويل لبشري ← بلا أزرار (الموظف يستلم، والأزرار تشوّش)
  * 2. سؤال مفتوح (اسم/عدد/وصف) ← بلا أزرار
- * 3. أزرار مقترحة ← تُحذف التي لا يذكر النص معناها (باستثناء زر التعديل/الموظف كبديل آمن)
- * 4. لا أزرار مقترحة ← بدائل النية إن كان النص يسمح
+ * 3. تكرار أزرار الرسالة السابقة ← بلا أزرار لمنع تكرار نفس الأزرار
+ * 4. أزرار مقترحة ← تُحذف التي لا يذكر النص معناها (باستثناء زر التعديل/الموظف كبديل آمن)
+ * 5. لا أزرار مقترحة ← بدائل النية إن كان النص يسمح ولم تكن مكررة
  */
 export function coherentQuickReplies(
   lastText: string,
   proposed: QuickReply[] | undefined | null,
   intent?: string,
   handoff = false,
+  profile?: RestaurantProfile,
+  lastOutboundButtons?: string[],
 ): QuickReply[] {
   const text = (lastText ?? '').toLowerCase();
 
   if (handoff) return [];
   if (endsWithOpenQuestion(lastText)) return [];
+
+  const filterConsecutiveDuplicate = (buttons: QuickReply[]): QuickReply[] => {
+    if (!lastOutboundButtons || lastOutboundButtons.length === 0 || buttons.length === 0) return buttons;
+    const currentTitles = buttons.map((b) => b.title.trim()).sort().join('|');
+    const lastTitles = [...lastOutboundButtons].map((t) => t.trim()).sort().join('|');
+    // إذا كانت نفس الأزرار المعروضة في الرسالة السابقة تمامًا، نحذفها منعًا للتكرار الممل
+    if (currentTitles === lastTitles) return [];
+    return buttons;
+  };
 
   const safe = clampButtons(proposed);
   if (safe.length > 0) {
@@ -207,13 +245,14 @@ export function coherentQuickReplies(
       return keys.some((k) => text.includes(k));
     });
     // لو النص يعرض خيارين صريحين (A ولا B) نحتفظ بالمطابق فقط
-    if (/ولا| أو | أم /.test(text) && kept.length > 0) return kept.slice(0, 3);
-    if (kept.length > 0) return kept;
+    if (/ولا| أو | أم /.test(text) && kept.length > 0) return filterConsecutiveDuplicate(kept.slice(0, 3));
+    if (kept.length > 0) return filterConsecutiveDuplicate(kept);
     // كل المقترح لا يمتّ للنص بصلة ← الأفضل بلا أزرار من أزرار نشاز
     return [];
   }
 
-  return fallbackQuickReplies(intent);
+  const fallbacks = fallbackQuickReplies(intent, profile);
+  return filterConsecutiveDuplicate(fallbacks);
 }
 
 /**

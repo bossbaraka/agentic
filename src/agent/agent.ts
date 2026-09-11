@@ -16,11 +16,13 @@ import {
   sendTyping,
 } from '../channels/send.js';
 import {
+  coherentQuickReplies,
   dayPart,
   firstNameOf,
   pickInboundReaction,
   pickWarmFallbackReply,
   typingDelayMs,
+  type QuickReply,
 } from './personality.js';
 import type {
   AgentResult,
@@ -338,12 +340,28 @@ export class AgentOrchestrator {
 
         // حارس نهائي مستقل عن النموذج: حتى لو تجاهل التعليمات، لا نرسل سؤالًا
         // سبق أن أجاب عنه العميل وكانت إجابته مثبتة في الذاكرة.
-        const guardedParts = removeRepeatedMemoryQuestions(result.parts, session.profile);
-        if (guardedParts.length !== result.parts.length) result.quickReplies = [];
+        const guardedParts = removeRepeatedMemoryQuestions(result.parts, session.profile, session.launch);
         result.parts = guardedParts;
         if (result.parts.length === 0 && !result.handoff) {
           result.parts = ['تمام، حفظت التفاصيل عندي ✅ خلّينا نكمل من آخر نقطة وصلنا لها.'];
         }
+
+        // استخراج أزرار الرسالة الصادرة السابقة لمنع تكرار نفس الأزرار مرتين متتاليتين
+        const lastOutboundMsg = [...session.messages].reverse().find((m) => m.dir === 'out');
+        const lastOutboundButtons = Array.isArray(lastOutboundMsg?.meta?.buttons)
+          ? (lastOutboundMsg.meta.buttons as QuickReply[]).map((b) => b.title)
+          : undefined;
+
+        // مواءمة وتدقيق الأزرار مع آخر نص وملف العميل ومنع التكرار المتتالي
+        const finalLastText = result.parts[result.parts.length - 1] ?? '';
+        result.quickReplies = coherentQuickReplies(
+          finalLastText,
+          result.quickReplies,
+          result.intent,
+          result.handoff,
+          session.profile,
+          lastOutboundButtons,
+        );
 
         const latency = Date.now() - started;
         store.recordUsage(key, {
@@ -398,7 +416,12 @@ export class AgentOrchestrator {
             type: 'text',
             body: part,
             createdAt: Date.now(),
-            meta: { intent: result.intent, engine: result.engine, latencyMs: latency },
+            meta: {
+              intent: result.intent,
+              engine: result.engine,
+              latencyMs: latency,
+              buttons: last ? result.quickReplies : undefined,
+            },
           };
           store.addOutbound(key, rec);
           this.emit({ t: 'outbound', sessionKey: key, name: session.name, message: rec, state: session.state });
@@ -712,21 +735,61 @@ function usableContactName(name: string, key: string): boolean {
  * النموذج يحصل على تعليمات الذاكرة، لكن هذا الفحص الحتمي يحمي التجربة أيضًا
  * عند تجاهل النموذج للسياق أو بعد استئناف جلسة قديمة.
  */
-export function removeRepeatedMemoryQuestions(parts: string[], profile?: RestaurantProfile): string[] {
-  const blocked: RegExp[] = [];
-  if (profile?.tables) blocked.push(/(?:كم|ما هو عدد|ما عدد)\s+(?:عدد\s+)?(?:ال)?طاول(?:ة|ات|ه|ا)?\s*(?:عندك|لديك)?/iu);
-  if (profile?.restaurant_name) blocked.push(/(?:شو|ما|ما هو)\s+(?:اسم)\s+(?:ال)?مطعم(?:ك|كم)?/iu);
-  if (profile?.city) blocked.push(/(?:بأي|في أي|ما هي)\s+مدينة\s+(?:ال)?مطعم(?:ك|كم)?/iu);
-  if (profile?.preferred_plan) blocked.push(/(?:أي|ما هي)\s+الباق(?:ة|ه)\s+(?:تريد|تفضّل|تختار|نثبت)/iu);
-  if (blocked.length === 0) return parts;
+export function removeRepeatedMemoryQuestions(
+  parts: string[],
+  profile?: RestaurantProfile,
+  launch?: { status?: string },
+): string[] {
+  const blockedPatterns: RegExp[] = [];
+
+  // إذا تم تأكيد طلب التفعيل، يُمنع طرح أي أسئلة تسجيل أو تفعيل جديدة
+  if (launch?.status === 'confirmed') {
+    blockedPatterns.push(/(?:تفعيل|تجهيز|اشترك|الاشتراك|باقة|طاولة|طاولات|اسم المطعم|مدينة).*?[؟?]/iu);
+  }
+
+  // منع سؤال الطاولات بكافة تصريفاته وصيغه إذا كان عدد الطاولات محفوظًا
+  if (profile?.tables && profile.tables > 0) {
+    blockedPatterns.push(/(?:كم|ما هو عدد|ما عدد|عدد|قديش|أديش|كام|شو عدد)\s+(?:عدد\s+)?(?:ال)?طاول(?:ة|ات|ه|ا)?/iu);
+    blockedPatterns.push(/(?:طاولة|طاولات)\s+(?:عندك|لديك|بالمطعم|تشتغل|شغالة).*?[؟?]/iu);
+    blockedPatterns.push(/(?:كم|قديش|أديش)\s+(?:طاولة|طاولات)/iu);
+  }
+
+  // منع سؤال اسم المطعم
+  if (profile?.restaurant_name) {
+    blockedPatterns.push(/(?:شو|ما|ما هو|إيش|ايش|اسمك|واسم)\s+(?:اسم\s+)?(?:ال)?مطعم(?:ك|كم)?/iu);
+    blockedPatterns.push(/(?:شو|ما|إيش|ايش)\s+(?:اسم|الاسم)\s+(?:المطعم|الكافيه|المقهى)/iu);
+  }
+
+  // منع سؤال المدينة
+  if (profile?.city) {
+    blockedPatterns.push(/(?:بأي|في أي|ما هي|وين|أين)\s+(?:مدينة|بلد|منطقة)/iu);
+    blockedPatterns.push(/مدينة\s+(?:ال)?مطعم(?:ك|كم)?/iu);
+  }
+
+  // منع سؤال الباقة إذا كانت محددة
+  if (profile?.preferred_plan) {
+    blockedPatterns.push(/(?:أي|ما هي|إيش|ايش|شو)\s+(?:ال)?باق(?:ة|ه)\s+(?:تريد|تفضّل|تفضل|تختار|نثبت|حاب)/iu);
+  }
+
+  // منع سؤال اسم العميل إذا كان مسجلاً
+  if (profile?.full_name) {
+    blockedPatterns.push(/(?:شو|ما|ما هو|إيش|ايش)\s+(?:اسمك|الاسم الكري?م)/iu);
+  }
+
+  if (blockedPatterns.length === 0) return parts;
 
   return parts
-    .map((part) => part
-      .split('\n')
-      .filter((line) => !blocked.some((pattern) => pattern.test(line) && /[؟?]/.test(line)))
-      .join('\n')
-      .replace(/\s{2,}/g, ' ')
-      .trim())
+    .map((part) =>
+      part
+        .split('\n')
+        .filter((line) => {
+          const isQuestion = /[؟?]/.test(line) || /(?:كم|شو|ما هو|بأي|أي باقة)/iu.test(line);
+          return !(isQuestion && blockedPatterns.some((pattern) => pattern.test(line)));
+        })
+        .join('\n')
+        .replace(/\s{2,}/g, ' ')
+        .trim(),
+    )
     .filter(Boolean);
 }
 
