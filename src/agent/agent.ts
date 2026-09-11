@@ -4,7 +4,7 @@ import { store } from '../lib/store.js';
 import { knowledge } from '../lib/knowledge.js';
 import { queue, rateLimiter } from '../lib/ratelimit.js';
 import { humanMs, log, sleep, truncate, uid } from '../lib/utils.js';
-import { generateReply, summarizeConversation, type Turn } from './llm.js';
+import { buildModelChain, generateReply, summarizeConversation, type Turn } from './llm.js';
 import { buildSummaryPrompt, buildSystemPrompt } from './systemPrompt.js';
 import {
   fetchChannelMedia,
@@ -27,12 +27,26 @@ import {
 import { bridge } from '../services/conversationBridge.js';
 import { handoffService } from '../services/handoffService.js';
 import { recordMetric } from '../db/repos/system.js';
+import {
+  analyzeMessages,
+  applyAnalysis,
+  stagePolicy,
+  objectionPolicy,
+  renderStateContext,
+  newCustomerState,
+  type CustomerState,
+  type ObjectionKind,
+  type SalesStage,
+} from './intelligence/index.js';
+import { applyResponsePolicy } from './responsePolicy.js';
+import { aiMetrics } from './qualityMetrics.js';
 import type {
   AgentResult,
   ConversationState,
   DashboardEvent,
   MediaPart,
   RestaurantProfile,
+  Session,
   StoredMessage,
   WaMessageType,
 } from '../types.js';
@@ -230,6 +244,22 @@ export class AgentOrchestrator {
         }
         await this.maybeSummarize(session.key);
 
+        // ── طبقة التحليل الحتمي (نية/مرحلة/ألم/اعتراض) — قبل بناء السياق ──
+        const gapMs = Date.now() - Math.max(session.lastInboundAt, session.updatedAt);
+        const customerState = bootstrapCustomerState(session);
+        customerState.returningAfterGap =
+          Boolean(session.profile?.tables || session.profile?.restaurant_name || session.profile?.preferred_plan) &&
+          gapMs >= config.bot.SESSION_TTL_MINUTES * 60_000;
+        const hoursSinceLastContact = gapMs / 3_600_000;
+
+        const batchText = batch.map((b) => b.body).join('\n');
+        const analysis = analyzeMessages({
+          combined: batchText,
+          lastBotMessage: lastAssistantMessage,
+          hasKnownBusiness: Boolean(session.profile?.restaurant_name || session.profile?.tables || session.profile?.preferred_plan),
+        });
+        const stateForTurn: CustomerState = { ...customerState, lastIntent: analysis.intent.intent };
+
         // (7) الوسائط
         const mediaByKey = new Map<string, MediaPart[]>();
         for (const m of batch) {
@@ -259,6 +289,35 @@ export class AgentOrchestrator {
           turns.push({ role: 'user', text: batch.map((b) => b.body).join('\n') });
         }
 
+        // ── CURRENT_CONTEXT الحتمي: المرحلة + الألم + الاعتراض + العائد ──
+        const profSummary = {
+          restaurantName: session.profile?.restaurant_name,
+          tables: session.profile?.tables,
+          branches: session.profile?.branches,
+          preferredPlan: session.profile?.preferred_plan,
+        };
+        const activeObjectionKinds: ObjectionKind[] = stateForTurn.objections.map((o) => o.kind);
+        const knownPain = analysis.pains[0] ?? (stateForTurn.painPoints.length ? { qualificationQuestion: '' } : undefined);
+        const intelLines: string[] = [];
+        const stateCtx = renderStateContext(stateForTurn, {
+          profile: profSummary,
+          hoursSinceLastContact,
+          painQuestion: knownPain && 'qualificationQuestion' in knownPain ? knownPain.qualificationQuestion : undefined,
+          objectionKinds: activeObjectionKinds,
+        });
+        if (stateCtx) intelLines.push(stateCtx);
+        if (analysis.intent.intent !== 'unclear' && analysis.intent.confidence !== 'low') {
+          intelLines.push(`- رسالته الحالية مفهومة حتميًا كـ «${analysis.intent.intent}» (ثقة ${analysis.intent.confidence}) — إن خالف فهمك للنص فاعتمد النص.`);
+        }
+        if (config.bot.MODE !== 'assistant') {
+          intelLines.push(`\n[سياسة المرحلة الملزمة]\n${stagePolicy(stateForTurn.stage)}`);
+          for (const o of stateForTurn.objections.filter((x) => activeObjectionKinds.includes(x.kind))) {
+            const pol = objectionPolicy(o.kind);
+            intelLines.push(`\n[سياسة اعتراض ${o.kind}]\n- افعل: ${pol.approach}\n- تجنّب: ${pol.avoid}`);
+          }
+        }
+        const intelligenceBlock = intelLines.join('\n');
+
         const systemPrompt = buildSystemPrompt({
           mode: config.bot.MODE,
           customerName: session.name,
@@ -269,6 +328,7 @@ export class AgentOrchestrator {
           profile: session.profile,
           launch: session.launch,
           lastAssistantMessage,
+          intelligenceBlock,
         });
 
         const extraBits: string[] = [];
@@ -285,8 +345,7 @@ export class AgentOrchestrator {
         const fname = firstNameOf(session.name);
         if (fname) extraBits.push(`[اسم العميل للنداء بلطف: ${fname} — ليس في كل رسالة.]`);
         extraBits.push(`[جزء اليوم: ${dayPart()} — حيِّ به فقط في أول تواصل أو بعد انقطاع.]`);
-        const sales = salesHint(batch.map((b) => b.body).join('\n'), session.summary);
-        if (sales) extraBits.push(sales);
+        // (التلميحات البيعية القديمة أُزيلت: سياسة المرحلة والاعتراض الحتمية أعلاه حلّت مكانها بدون تضارب)
         const hasKnownData = Boolean(
           session.profile?.tables ||
           session.profile?.restaurant_name ||
@@ -345,6 +404,23 @@ export class AgentOrchestrator {
           return;
         }
 
+        // ── سياسة الاستجابة (حتمية): أسعار رسمية، لا إلحاح CTA مكرر، بلا تسرب داخلي ──
+        const policy = applyResponsePolicy({
+          parts: result.parts,
+          previousOutboundText: lastAssistantMessage,
+          purchaseIntent: stateForTurn.purchaseIntent,
+          supportMode: analysis.supportMode,
+          intentUnclear: analysis.intent.intent === 'unclear',
+          engine: result.engine,
+          sessionKey: key,
+        });
+        if (policy.parts.length > 0) result.parts = policy.parts;
+        for (const f of policy.findings) {
+          if (f.kind === 'price_violation') aiMetrics.recordPriceViolation(f.repaired);
+          else if (f.kind === 'cta_repeat') aiMetrics.recordCtaRepair('cta_repeat');
+          else if (f.kind === 'premature_cta') aiMetrics.recordCtaRepair('premature_cta');
+        }
+
         // حارس نهائي مستقل عن النموذج: حتى لو تجاهل التعليمات، لا نرسل سؤالًا
         // سبق أن أجاب عنه العميل وكانت إجابته مثبتة في الذاكرة.
         const guardedParts = removeRepeatedMemoryQuestions(result.parts, session.profile, session.launch);
@@ -379,18 +455,62 @@ export class AgentOrchestrator {
         });
         recordMetric('llm_latency_ms', { refKey: key, value: latency });
 
+        // ── تحديث الحالة الدائمة بنتائج الدورة (شاملة أدوات هذه الدورة) ──
+        const toolOk = (name: string) => result.toolsCalled.some((t) => t.name === name && (t.result as any)?.ok !== false);
+        const toolFacts = {
+          launchConfirmed: toolOk('confirm_launch_order') || toolOk('capture_subscription_lead'),
+          bookingCreated: toolOk('create_booking'),
+          supportTicket: toolOk('create_support_ticket'),
+        };
+        const newState = applyAnalysis({
+          state: stateForTurn,
+          analysis,
+          profile: profSummary,
+          toolFacts,
+        });
+        // الباقة الأخيرة المعروضة تُثبَّت من أدوات هذه الدورة إن وُجدت
+        const recommended = result.toolsCalled.find((t) => t.name === 'recommend_plan' || t.name === 'save_restaurant_profile');
+        const recPlan = (recommended?.result as any)?.recommended ?? (recommended?.result as any)?.profile?.preferred_plan;
+        if (typeof recPlan === 'string' && ['starter', 'pro', 'enterprise'].includes(recPlan)) {
+          newState.lastOffer = recPlan as CustomerState['lastOffer'];
+        }
+        if (session.launch?.status) newState.onboardingStatus = session.launch.status;
+        store.patchCustomerState(key, newState);
+        bridge.patchAgentState(key, {
+          salesStage: newState.stage,
+          leadScore: newState.leadScore,
+          lastIntent: newState.lastIntent,
+          agentStateJson: JSON.stringify(newState),
+        });
+
+        // ── مقاييس جودة الوكيل (قابلة للقياس فقط) ──
+        aiMetrics.recordReply({
+          engine: result.engine,
+          degraded: result.degraded,
+          aiStatus: result.aiStatus,
+          latencyMs: latency,
+          handoff: result.handoff,
+          toolsCalled: result.toolsCalled.map((t) => ({ name: t.name, ok: (t.result as any)?.ok !== false })),
+          detectedIntent: analysis.intent.intent,
+          modelIntent: result.intent,
+          intentsAgree: intentsRoughlyAgree(analysis.intent.intent, result.intent),
+        });
+
         // وضع احتياطي؟ العميل حصل على رد مفيد — لكن صاحبه يجب أن يعرف السبب ويصلحه
-        if (result.degraded) {
-          log.warn(`⚠️ [${key}] رد احتياطي محلي — ${result.degradedReason ?? 'السبب غير معروف'}`);
-          this.emit({ t: 'error', sessionKey: key, message: `وضع احتياطي: ${result.degradedReason ?? ''}` });
+        if (result.degraded || result.aiStatus === 'ai_unavailable') {
+          log.warn(`⚠️ [${key}] رد احتياطي محلي (${result.aiStatus ?? 'ai_unavailable'}) — ${result.degradedReason ?? 'السبب غير معروف'}`);
+          this.emit({ t: 'error', sessionKey: key, message: `وضع احتياطي (${result.aiStatus ?? 'ai_unavailable'}): ${result.degradedReason ?? ''}` });
         }
 
         log.ai(
           `${result.engine === 'mock' && !result.degraded ? '🧪' : result.degraded ? '⚠️' : '✨'} [${key}] ${humanMs(latency)} · ` +
           `${result.usage.promptTokens}↑/${result.usage.candidatesTokens}↓ · ` +
-          `نية: ${result.intent ?? '؟'} · ${result.parts.length} جزء` +
+          `نية: ${analysis.intent.intent ?? '؟'}${result.intent && result.intent !== analysis.intent.intent ? ` (نموذج: ${result.intent})` : ''} · ` +
+          `مرحلة: ${newState.stage} · نقاط: ${newState.leadScore} (${newState.leadCategory}) · ` +
+          `${result.parts.length} جزء` +
           (result.handoff ? ' · 🚨 تحويل بشري' : '') +
-          (result.degraded ? ' · ⚠️ احتياطي محلي' : ''),
+          (result.degraded ? ' · ⚠️ احتياطي محلي' : '') +
+          (result.aiStatus === 'ai_degraded' ? ' · ↘️ موديل بديل' : ''),
         );
 
         // بث الأدوات للوحة
@@ -471,7 +591,15 @@ export class AgentOrchestrator {
           }
         }
 
-        // التحويل لبشري
+        // التحويل لبشري — مع بيانات تسليم كاملة (مرحلة/نقاط/باقة/اعتراض)
+        const handoffMeta = {
+          stage: newState.stage as string,
+          leadScore: newState.leadScore,
+          restaurant: session.profile?.restaurant_name,
+          tables: session.profile?.tables,
+          plan: session.profile?.preferred_plan,
+          objection: newState.objections[0]?.kind as string | undefined,
+        };
         if (result.handoff) {
           if (result.orderRef) {
             // طلب إطلاق مؤكد — الملف الكامل أُرسل لمدير المنصة عبر الإجراء الجانبي،
@@ -488,6 +616,8 @@ export class AgentOrchestrator {
               name: session.name,
               reason: result.reason ?? 'تحويل تلقائي (النموذج)',
               lastMessage: batch.map((b) => b.body).join('\n'),
+              summary: session.summary,
+              meta: handoffMeta,
             });
             bridge.setState(key, 'human', result.reason);
             this.emit({ t: 'status', sessionKey: key, state: 'human', note: result.reason });
@@ -742,13 +872,21 @@ export class AgentOrchestrator {
     return ok.ok;
   }
 
-  /** حالة البوت للنشر في /health */
+  /** حالة البوت للنشر في /health — تعرض المزوّد الفعلي وسلسلة الموديلات ومقاييس الجودة */
   status() {
+    const hasOpenAi = config.llm.PROVIDER === 'openai' && Boolean(config.openai.API_KEY);
+    const hasGemini = config.llm.PROVIDER === 'gemini' && Boolean(config.gemini.API_KEY);
+    const provider = config.llm.PROVIDER === 'openai'
+      ? (config.openai.API_KEY ? 'openai' : 'mock')
+      : (config.gemini.API_KEY ? 'gemini' : 'mock');
     return {
       demoMode: config.env.DEMO_MODE,
       mode: config.bot.MODE,
-      model: config.gemini.API_KEY ? config.gemini.MODEL : 'mock-engine',
-      engine: config.gemini.API_KEY ? 'gemini' : 'mock',
+      provider: config.llm.PROVIDER,
+      model: hasOpenAi ? config.openai.MODEL : hasGemini ? config.gemini.MODEL : 'mock-engine',
+      engine: provider,
+      modelChain: hasGemini && !hasOpenAi ? buildModelChain() : undefined,
+      aiQuality: aiMetrics.snapshot(),
       knowledgeFiles: knowledge.files(),
       pendingSessions: this.pending.size,
       busySessions: this.busy.size,
@@ -910,32 +1048,6 @@ export function autoExtractFacts(
   return patch;
 }
 
-/**
- * تلميح بيعي ذكي يُحقن في سياق النموذج حسب كلام العميل.
- * يوجّه «الخبير البشري» لمعالجة الاعتراض الصحيح بدل الرد العام —
- * سطر واحد خفيف، لا يُذكر اسمه للعميل أبدًا.
- */
-function salesHint(userText: string, summary: string): string | null {
-  const t = `${userText}\n${summary}`.toLowerCase();
-
-  if (/غالي|غالية|سعر مرتفع|ميزانية|بفكر|افكر|أفكر|بعدين|مش متأكد|متردد|شور|استشير|فكر فيها/.test(t)) {
-    return '[دليل بيعي: العميل متردد/يعترض على السعر — عالج بجملة قيمة واحدة: قسّط السعر على الطاولة/اليوم، اذكر التوفير السنوي، وذكّر (بدون بطاقة للبدء + إلغاء/ترقية مرنة). ثم سؤال واحد صغير يقود للتفعيل. ممنوع الخصم أو الوعد به.]';
-  }
-  if (/عندي نظام|نظام ثاني|شغال ورقي|ورق|دفتر|اكسل|excel|ماشي الحال/.test(t)) {
-    return '[دليل بيعي: يقارن بوضعه الحالي — لا تسرد المزايا. اسأل عن أكبر ألم فيه (ضياع طلبات؟ بطء الذروة؟ حسابات آخر اليوم؟) ثم اربطه بميزة واحدة تحلّه بالضبط.]';
-  }
-  if (/معقد|صعب|كبير علي|ما افهم تقنية|موظفين كبار|خايف|صعب علينا/.test(t)) {
-    return '[دليل بيعي: خوف من التعقيد — طمئنه: يعمل على أجهزته الحالية بدون معدات، التفعيل خلال دقائق، والفريق يجهّز كل شيء معه خطوة بخطوة. ثم سؤال واحد.]';
-  }
-  if (/مطعم صغير|كشك|فود ترك|كافيه صغير|طاولات قليلة|عدد قليل|\b([1-9]|1[0-4])\s*(طاولة|طاولات|طاو)\b/.test(t)) {
-    return '[دليل بيعي: يظن النظام أكبر منه — وضّح أن الأساسية تبدأ من 300₪ وتعمل من أول طاولة، والترقية لاحقًا بضغطة من اللوحة. ثم سؤال واحد.]';
-  }
-  if (/فروع|سلسلة|سلاسل|فرع ثاني|فرع جديد/.test(t)) {
-    return '[دليل بيعي: عميل سلاسل/فروع (قيمة عالية) — ركّز على باقة المؤسسات: إدارة الفروع، السعة المفتوحة، النطاق الخاص، ومدير الحساب. اسأل عن عدد الفروع الحالي.]';
-  }
-  return null;
-}
-
 /** كشف لغة مبسّط (يُستخدم فقط لضبط لغة الجلسة) */
 export function detectLanguage(text: string): string | null {
   if (!text) return null;
@@ -949,6 +1061,58 @@ export function detectLanguage(text: string): string | null {
   if (hebrew / total > 0.4) return 'he';
   if (latin / total > 0.6) return 'en';
   return null;
+}
+
+/**
+ * تهيئة الحالة الدائمة من جلسة قائمة (أو جلسة قديمة سبقت طبقة الحالة).
+ * نستنتج المرحلة من الأدلة المحفوظة فقط — لا نعطي العميل مرحلة أعمق مما يثبته ملفه.
+ */
+export function bootstrapCustomerState(session: Session): CustomerState {
+  const base = session.customer ?? newCustomerState();
+  // جلسة قديمة بلا حالة: استنتاج أولي محافظ من الملف والإطلاق
+  if (!session.customer) {
+    const p = session.profile ?? {};
+    if (session.launch?.status === 'confirmed') base.stage = 'ONBOARDING';
+    else if (session.launch?.status === 'awaiting_confirmation') base.stage = 'PURCHASE_INTENT';
+    else if (p.preferred_plan) base.stage = 'RECOMMENDATION';
+    else if (p.tables || p.restaurant_name) base.stage = 'QUALIFICATION';
+    if (p.preferred_plan) base.lastOffer = p.preferred_plan;
+    if (session.launch?.orderRef) {
+      base.purchaseIntent = true;
+      base.onboardingStatus = 'confirmed';
+      base.leadScore = Math.max(base.leadScore, 90);
+    }
+    base.leadCategory = base.leadScore >= 81 ? 'hot' : base.leadScore >= 61 ? 'qualified' : base.leadScore >= 31 ? 'warm' : 'cold';
+  }
+  return base;
+}
+
+/**
+ * مقارنة تقريبية بين النية الحتمية ونية النموذج — لمقياس الاتساق فقط
+ * (ليست حكمًا صحيح/خطأ). نية نموذج غير معروفة → false بلا عقاب إضافي.
+ */
+export function intentsRoughlyAgree(detected: string | undefined, modelIntent: string | undefined): boolean {
+  if (!detected || !modelIntent) return false;
+  const MODEL_TO_CANONICAL: Record<string, string[]> = {
+    'تحية': ['greeting'],
+    'عام': ['unclear', 'product_information', 'greeting', 'unrelated'],
+    'استفسار_أسعار': ['pricing', 'plan_comparison'],
+    'استفسار_باقات': ['pricing', 'product_information', 'plan_comparison', 'service_information'],
+    'توصية_باقة': ['recommendation', 'pricing'],
+    'اعتراض_سعري': ['objection_price'],
+    'مقارنة_وضع_حالي': ['competitor_comparison', 'objection_value'],
+    'طلب_تفعيل': ['purchase_intent', 'onboarding'],
+    'بيانات_تفعيل': ['onboarding', 'restaurant_qualification', 'purchase_intent'],
+    'تجهيز_إطلاق': ['onboarding', 'purchase_intent', 'restaurant_qualification'],
+    'تأكيد_طلب': ['purchase_intent', 'onboarding'],
+    'طلب_تحويل': ['human_request'],
+    'شكوى': ['complaint'],
+    'دعم_تقني': ['support', 'complaint', 'technical_question'],
+    'حجز': ['booking', 'booking_modification', 'booking_cancellation', 'onboarding'],
+    'إيجابي': ['greeting', 'unclear', 'purchase_intent'],
+  };
+  const allowed = MODEL_TO_CANONICAL[modelIntent];
+  return allowed ? allowed.includes(detected) : false;
 }
 
 /** إنشاء ملف سجلات الأحداث (اختياري) */

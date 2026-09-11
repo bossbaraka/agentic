@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { config } from '../config.js';
-import type { ConversationState, LaunchState, RestaurantProfile, Session, StoredMessage } from '../types.js';
+import type { ConversationState, CustomerState, LaunchState, RestaurantProfile, Session, StoredMessage } from '../types.js';
+import { newCustomerState } from '../agent/intelligence/customerState.js';
 import { log, uid } from './utils.js';
 
 /**
@@ -175,6 +176,21 @@ export class Store {
     s.updatedAt = Date.now();
     this.dirty = true;
     return s.launch;
+  }
+
+  /** حالة العميل الدائمة — تُنشأ عند أول وصول وتُدمج جزئيًا */
+  customerState(key: string): CustomerState {
+    const s = this.get(key);
+    if (!s.customer) s.customer = newCustomerState();
+    return s.customer;
+  }
+
+  patchCustomerState(key: string, patch: Partial<CustomerState>): CustomerState {
+    const s = this.get(key);
+    s.customer = { ...newCustomerState(), ...(s.customer ?? {}), ...patch, updatedAt: Date.now() };
+    s.updatedAt = Date.now();
+    this.dirty = true;
+    return s.customer;
   }
 
   /** إضافة رسالة واردة */

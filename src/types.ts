@@ -1,5 +1,9 @@
 /** ===== الأنواع المشتركة في المشروع ===== */
 
+import type { CustomerState } from './agent/intelligence/types.js';
+
+export type { CustomerState };
+
 /** وضع تشغيل المحادثة: بوت تلقائي، أو موظف بشري، أو إيقاف مؤقت */
 export type ConversationState = 'bot' | 'human' | 'paused';
 
@@ -100,6 +104,11 @@ export interface Session {
   profile?: RestaurantProfile;
   /** حالة طلب الإطلاق: تصور معروض / مؤكد عند مدير المنصة */
   launch?: LaunchState;
+  /**
+   * حالة العميل الدائمة (مرحلة البيع، الألم، الاعتراضات، نقاط الجودة، آخر نية).
+   * منفصلة عن الجلسة: تعبر عبر تدوير الجلسة وإعادة التشغيل، وتُطابق في SQLite.
+   */
+  customer?: CustomerState;
   /** اسم الموظف/العميل كما يعرفه البوت */
   knownName?: string;
   createdAt: number;

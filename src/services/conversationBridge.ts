@@ -4,7 +4,7 @@
  * كل الدوال دفاعية (لا ترمي خطأ يكسر مسار الرسالة).
  */
 import { log } from '../lib/utils.js';
-import { upsertUser, patchCustomer, type CustomerPatch } from '../db/repos/users.js';
+import { upsertUser, patchCustomer, patchAgentState, type CustomerPatch } from '../db/repos/users.js';
 import {
   ensureConversation,
   insertMessage,
@@ -80,6 +80,11 @@ export const bridge = {
 
   patchCustomer(contactKey: string, patch: CustomerPatch): void {
     safe(() => patchCustomer(contactKey, patch), 'patchCustomer');
+  },
+
+  /** مطابقة حالة الوكيل الدائمة (مرحلة/نقاط/نية) في SQLite — تظهر في اللوحة والتقارير */
+  patchAgentState(contactKey: string, patch: { salesStage?: string; leadScore?: number; lastIntent?: string; agentStateJson?: string }): void {
+    safe(() => patchAgentState(contactKey, patch), 'patchAgentState');
   },
 
   setState(contactKey: string, state: ConversationState, reason?: string | null, assignedAdminId?: number | null): void {

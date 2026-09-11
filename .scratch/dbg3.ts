@@ -1,0 +1,14 @@
+const { knowledge } = await import('../src/lib/knowledge.js');
+const { buildSystemPrompt } = await import('../src/agent/systemPrompt.js');
+const { config } = await import('../src/config.js');
+console.log('KNOWLEDGE_DIR:', config.paths.KNOWLEDGE_DIR, '| BUSINESS_NAME:', config.bot.BUSINESS_NAME, '| BOT_NAME:', config.bot.BOT_NAME);
+const rendered = knowledge.render();
+console.log('render() length:', rendered.length, '| يحوي الأسعار:', /300|550|850/.test(rendered));
+const sys = buildSystemPrompt({ role: 'customer', sessionKey: 'dbg', customerNumber: 'x', sessionLanguage: 'ar' } as any);
+console.log('prompt يحوي قاعدة المعرفة:', sys.includes(rendered.slice(0, 80)));
+console.log('prompt يحوي اسم العمل:', sys.includes(config.bot.BUSINESS_NAME));
+console.log('prompt يحوي اسم البوت:', sys.includes(config.bot.BOT_NAME));
+knowledge.reload();
+const r2 = knowledge.render();
+const sys2 = buildSystemPrompt({ role: 'customer', sessionKey: 'dbg', customerNumber: 'x', sessionLanguage: 'ar' } as any);
+console.log('--- بعد reload: length:', r2.length, '| prompt:', sys2.length, '| محقونة:', sys2.includes(r2.slice(0, 80)));

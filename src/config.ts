@@ -80,12 +80,15 @@ export const config = {
     FAST_MODEL: str('GEMINI_FAST_MODEL', 'gemini-2.5-flash-lite'),
     /**
      * بدائل تلقائية تُجرَّب بالترتيب عند تعذّر الموديل الرئيسي (404/حصة منتهية).
+     * قائمة مُدقَّقة فقط (لا معاينات ولا موديلات موقوفة):
+     *   gemini-3.5-flash-lite و gemini-3.1-flash-lite → مستقرة GA لدى Google.
+     * (سلسلة 2025 القديمة كانت تتضمن gemini-3-flash-preview — أُزيلت: موديل
+     *  معاينة عرضة للإطفاء بأسبوعين إشعار، وهو عكس الغرض من بديل طوارئ.)
      * هذا يحمي البوت من توقف الموديلات القديمة — العميل لا يرى أي خلل أبدًا.
      */
     MODEL_FALLBACKS: list('GEMINI_MODEL_FALLBACKS', [
       'gemini-3.5-flash-lite',
       'gemini-3.1-flash-lite',
-      'gemini-3-flash-preview',
     ]),
     TEMPERATURE: num('GEMINI_TEMPERATURE', 0.8),
     MAX_OUTPUT_TOKENS: num('GEMINI_MAX_OUTPUT_TOKENS', 1536),
