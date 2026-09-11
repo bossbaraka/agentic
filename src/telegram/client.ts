@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { config } from '../config.js';
 import { log, sleep, splitText, uid } from '../lib/utils.js';
 import type { MediaPart } from '../types.js';
@@ -127,11 +128,184 @@ export async function tgSendText(
   return { ok: allOk, messageId: lastId, error: allOk ? undefined : 'telegram_send_failed' };
 }
 
-/** إيقاف دائرة التحميل على الزر بعد الضغط */
-export async function tgAnswerCallback(callbackId: string, text?: string): Promise<void> {
-  if (config.env.DEMO_MODE || !callbackId) return;
+/** إيقاف دائرة التحميل على الزر بعد الضغط (مع نص/تنبيه اختياري) */
+export async function tgAnswerCallback(
+  callbackId: string,
+  opts: { text?: string; alert?: boolean } = {},
+): Promise<void> {
+  if (config.env.DEMO_MODE || !callbackId) {
+    if (config.env.DEMO_MODE && opts.text) log.wa(`🔔 [تجربة] تنبيه زر: ${opts.text}`);
+    return;
+  }
   try {
-    await tgCall('answerCallbackQuery', { callback_query_id: callbackId, ...(text ? { text } : {}) });
+    await tgCall('answerCallbackQuery', {
+      callback_query_id: callbackId,
+      ...(opts.text ? { text: opts.text, show_alert: opts.alert === true } : {}),
+    });
+  } catch {
+    /* غير حرج */
+  }
+}
+
+// ─────────────────────── واجهة غنية: لوحات مفاتيح وتحرير ───────────────────────
+
+export interface TgInlineButton {
+  text: string;
+  callback_data?: string;
+  url?: string;
+}
+export type TgInlineKeyboard = TgInlineButton[][];
+
+export interface SendMessageOpts {
+  text: string;
+  inline?: TgInlineKeyboard;
+  /** لوحة مفاتيح دائمة (Reply Keyboard) — أزرار نصية */
+  replyKeyboard?: string[][];
+  /** طيّ لوحة المفاتيح الدائمة */
+  removeReplyKeyboard?: boolean;
+  replyTo?: string | number;
+  parseMode?: 'Markdown' | 'HTML' | undefined;
+  quiet?: boolean;
+}
+
+function replyMarkup(opts: SendMessageOpts): Record<string, unknown> | undefined {
+  if (opts.removeReplyKeyboard) return { remove_keyboard: true };
+  if (opts.inline?.length) {
+    return {
+      inline_keyboard: opts.inline.map((row) =>
+        row.map((b) => {
+          const out: Record<string, unknown> = { text: b.text.slice(0, 80) };
+          if (b.url) out.url = b.url;
+          else out.callback_data = (b.callback_data ?? b.text).slice(0, 64);
+          return out;
+        }),
+      ),
+    };
+  }
+  if (opts.replyKeyboard?.length) {
+    return {
+      keyboard: opts.replyKeyboard.map((row) => row.map((text) => ({ text }))),
+      resize_keyboard: true,
+      is_persistent: true,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * إرسال رسالة كاملة (نص + لوحة inline أو reply keyboard).
+ * يجرب Markdown ثم يسقط لنص خام عند فشل التنسيق.
+ */
+export async function tgSendMessage(
+  chatId: string | number,
+  opts: SendMessageOpts,
+): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+  const markup = replyMarkup(opts);
+
+  if (config.env.DEMO_MODE) {
+    if (!opts.quiet) {
+      const rows = opts.inline?.map((r) => r.map((b) => b.text).join(' | ')).join(' / ');
+      const kb = opts.replyKeyboard?.map((r) => r.join(' | ')).join(' / ');
+      log.wa(`🟢 تيليجرام [تجربة] → ${chatId}: ${opts.text.slice(0, 200)}${rows ? `  [أزرار: ${rows}]` : ''}${kb ? `  [لوحة: ${kb}]` : ''}`);
+    }
+    return { ok: true, messageId: `tgdemo${Date.now()}` };
+  }
+
+  const params: Record<string, unknown> = {
+    chat_id: chatId,
+    text: opts.text,
+    ...(opts.replyTo ? { reply_to_message_id: Number(opts.replyTo) || opts.replyTo } : {}),
+    ...(markup ? { reply_markup: markup } : {}),
+  };
+
+  const trySend = async (parseMode?: string) => {
+    const p = { ...params };
+    if (parseMode) p.parse_mode = parseMode;
+    return tgCall<any>('sendMessage', p);
+  };
+
+  try {
+    const msg = await trySend(opts.parseMode === undefined ? 'Markdown' : opts.parseMode);
+    return { ok: true, messageId: String(msg.message_id) };
+  } catch (err) {
+    const m = (err as Error).message ?? '';
+    if (/parse|entities|can't parse/i.test(m)) {
+      try {
+        const msg = await trySend(undefined);
+        return { ok: true, messageId: String(msg.message_id) };
+      } catch (err2) {
+        log.error(`فشل إرسال تيليجرام إلى ${chatId}: ${(err2 as Error).message}`);
+        return { ok: false, error: (err2 as Error).message };
+      }
+    }
+    log.error(`فشل إرسال تيليجرام إلى ${chatId}: ${m}`);
+    return { ok: false, error: m };
+  }
+}
+
+/** تعديل رسالة قائمة (مع لوحة أزرار جديدة) */
+export async function tgEditMessage(
+  chatId: string | number,
+  messageId: string | number,
+  opts: { text: string; inline?: TgInlineKeyboard },
+): Promise<{ ok: boolean; error?: string }> {
+  if (config.env.DEMO_MODE) {
+    log.wa(`🟢 تيليجرام [تجربة] تعديل → ${chatId}: ${opts.text.slice(0, 160)}`);
+    return { ok: true };
+  }
+  const markup = replyMarkup({ text: opts.text, inline: opts.inline });
+  const params: Record<string, unknown> = {
+    chat_id: chatId,
+    message_id: Number(messageId),
+    text: opts.text,
+    ...(markup ? { reply_markup: markup } : {}),
+  };
+  try {
+    await tgCall('editMessageText', params);
+    return { ok: true };
+  } catch (err) {
+    const m = (err as Error).message ?? '';
+    if (/not modified/i.test(m)) return { ok: true };
+    if (/parse|entities/i.test(m)) {
+      delete params.parse_mode;
+      try {
+        await tgCall('editMessageText', params);
+        return { ok: true };
+      } catch (e2) {
+        return { ok: false, error: (e2 as Error).message };
+      }
+    }
+    // الرسالة أقدم من أن تُعدّل أو أُرسلت بلوحة رد — أرسل جديدة
+    const sent = await tgSendMessage(chatId, { text: opts.text, inline: opts.inline });
+    return sent.ok ? { ok: true } : { ok: false, error: sent.error };
+  }
+}
+
+export async function tgDeleteMessage(chatId: string | number, messageId: string | number): Promise<void> {
+  if (config.env.DEMO_MODE) return;
+  try {
+    await tgCall('deleteMessage', { chat_id: chatId, message_id: Number(messageId) });
+  } catch {
+    /* غير حرج */
+  }
+}
+
+/** ضبط قائمة أوامر البوت (تظهر بجانب صندوق الكتابة) */
+export async function tgSetMyCommands(): Promise<void> {
+  if (config.env.DEMO_MODE || !config.telegram.TOKEN) return;
+  try {
+    await tgCall('setMyCommands', {
+      commands: [
+        { command: 'start', description: '🏠 الرئيسية' },
+        { command: 'menu', description: '🛎️ الخدمات والقائمة' },
+        { command: 'bookings', description: '📅 حجوزاتي' },
+        { command: 'orders', description: '📋 طلباتي' },
+        { command: 'support', description: '💬 الدعم والتحدث لموظف' },
+        { command: 'bot', description: '🤖 العودة للرد الآلي' },
+        { command: 'human', description: '🙋 تحويل لموظف بشري' },
+        { command: 'help', description: '❓ المساعدة' },
+      ],
+    });
   } catch {
     /* غير حرج */
   }
@@ -305,8 +479,12 @@ export async function deleteTelegramWebhook(): Promise<void> {
   }
 }
 
-/** تحقق من توقيع webhook (secret_token) */
+/** تحقق من توقيع webhook (secret_token) — بمقارنة زمنية ثابتة */
 export function verifyTelegramSecret(token: string | undefined): boolean {
   if (!config.telegram.WEBHOOK_SECRET) return true; // بدون سر → نقبل (لا يوجد webhook فعلي عادةً)
-  return token === config.telegram.WEBHOOK_SECRET;
+  if (!token) return false;
+  const a = Buffer.from(token);
+  const b = Buffer.from(config.telegram.WEBHOOK_SECRET);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
