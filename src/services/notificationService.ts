@@ -49,11 +49,15 @@ class NotificationService {
 
   /** تنبيه الفريق (مدير أو موظف مناوب) */
   staffAlert(scope: 'manager' | 'human', note: string, extra: Record<string, unknown> = {}): number {
-    return this.enqueue({
+    const id = this.enqueue({
       kind: 'staff_alert',
       subject: note.slice(0, 120),
       payload: { scope, note, ...extra },
     });
+    if (config.notifications.ENABLED && !this.running) {
+      setTimeout(() => void this.tick(), 10)?.unref?.();
+    }
+    return id;
   }
 
   /** إلغاء تذكيرات حجز معيّن (عند تعديله/إلغائه) */

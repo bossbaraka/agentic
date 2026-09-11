@@ -438,38 +438,53 @@ const HANDLERS: Record<string, ToolHandler> = {
     if (!isProfileReady(profile)) {
       return { ok: false, data: { error: 'الملف ناقص', missing: missingRequired(profile), next_question: nextQuestion(profile) } };
     }
+    const finalProfile = store.get(ctx.sessionKey).profile ?? {};
     if (session.launch?.status === 'confirmed' && session.launch.orderRef) {
-      return { ok: true, data: { order_ref: session.launch.orderRef, duplicate: true } };
+      const existingRef = session.launch.orderRef;
+      const managerNote = managerOrderMessage(finalProfile, existingRef, ctx.sessionKey);
+      return {
+        ok: true,
+        data: { order_ref: existingRef, duplicate: true },
+        userMessage:
+          `طلبك مسجل مسبقًا برقم *${existingRef}* ✅\n` +
+          `ملفك الكامل وصل *مدير المنصة* ويتواصل معك لتجهيز نسختك في أقرب وقت 🚀\n` +
+          `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.`,
+        sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef: existingRef } },
+      };
     }
     if (typeof args.notes === 'string' && args.notes.trim()) {
       store.patchProfile(ctx.sessionKey, { notes: args.notes.trim().slice(0, 500) });
     }
 
-    const finalProfile = store.get(ctx.sessionKey).profile ?? {};
-    const orderRef = `ORD-${uid('').slice(-6).toUpperCase()}`;
-    const summary = orderSummaryLine(finalProfile, orderRef);
+    const proposedRef = `ORD-${uid('').slice(-6).toUpperCase()}`;
     const order = orderService.launchOrder({
       contactKey: ctx.sessionKey,
-      summary,
+      ref: proposedRef,
+      summary: orderSummaryLine(finalProfile, proposedRef),
       payload: { ...finalProfile },
       serviceSlug: finalProfile.preferred_plan ?? undefined,
       totalAmount: getPlan((finalProfile.preferred_plan ?? 'pro') as 'starter' | 'pro' | 'enterprise').priceMonthly,
       language: uiLang(ctx),
     });
-    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: order.ref, confirmedAt: Date.now() });
+
+    const finalRef = order.ref;
+    const summary = orderSummaryLine(finalProfile, finalRef);
+    const managerNote = managerOrderMessage(finalProfile, finalRef, ctx.sessionKey);
+
+    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: finalRef, confirmedAt: Date.now() });
     bridge.patchCustomer(ctx.sessionKey, {
       fullName: finalProfile.full_name, restaurantName: finalProfile.restaurant_name, city: finalProfile.city,
       tables: finalProfile.tables, branches: finalProfile.branches, preferredPlan: finalProfile.preferred_plan,
     });
-    log.tool(`confirm_launch_order → ${order.ref}`);
+    log.tool(`confirm_launch_order → ${finalRef}`);
     return {
       ok: true,
-      data: { order_ref: order.ref, summary },
+      data: { order_ref: finalRef, summary },
       userMessage:
-        `تم تأكيد طلبك ✅ رقم الطلب: *${order.ref}*\n` +
+        `تم تأكيد طلبك ✅ رقم الطلب: *${finalRef}*\n` +
         `ملفك الكامل وصل *مدير المنصة* ويتواصل معك لتجهيز نسختك خلال دقائق عادة، وبدون بطاقة للبدء 🚀\n` +
         `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.`,
-      sideEffect: { kind: 'handoff', payload: { reason: `طلب إطلاق مؤكد ${order.ref}` } },
+      sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef: finalRef } },
     };
   },
 
@@ -718,7 +733,14 @@ const HANDLERS: Record<string, ToolHandler> = {
       preferred_plan: ['starter', 'pro', 'enterprise'].includes(lead.preferred_plan) ? lead.preferred_plan as RestaurantProfile['preferred_plan'] : undefined,
     });
     store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: lead.ref, confirmedAt: Date.now() });
-    return { ok: true, data: lead, userMessage: `سجّلت طلبك ✅ الرقم: *${lead.ref}* — الفريق يتواصل معك الآن.` };
+    const profile = store.get(ctx.sessionKey).profile ?? {};
+    const managerNote = managerOrderMessage(profile, lead.ref, ctx.sessionKey);
+    return {
+      ok: true,
+      data: lead,
+      userMessage: `سجّلت طلبك ✅ الرقم: *${lead.ref}* — الفريق يتواصل معك الآن.`,
+      sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef: lead.ref } },
+    };
   },
 };
 

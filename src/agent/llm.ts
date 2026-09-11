@@ -704,10 +704,12 @@ async function generateReplyOpenAI(input: AgentInput, started: number): Promise<
   }
 
   const supportTicket = toolsCalled.some((t) => t.name === 'create_support_ticket');
-  const confirmedOrder = toolsCalled.find((t) => t.name === 'confirm_launch_order');
+  const confirmedOrder = toolsCalled.find(
+    (t) => t.name === 'confirm_launch_order' || t.name === 'capture_subscription_lead',
+  );
   const orderRef =
-    confirmedOrder && (confirmedOrder.result as any)?.order_ref
-      ? String((confirmedOrder.result as any).order_ref)
+    confirmedOrder && ((confirmedOrder.result as any)?.order_ref || (confirmedOrder.result as any)?.ref)
+      ? String((confirmedOrder.result as any).order_ref ?? (confirmedOrder.result as any).ref)
       : undefined;
 
   return finishOutput({
@@ -923,10 +925,12 @@ async function generateReplyInner(input: AgentInput, started: number): Promise<A
   }
 
   const supportTicket = toolsCalled.some((t) => t.name === 'create_support_ticket');
-  const confirmedOrder = toolsCalled.find((t) => t.name === 'confirm_launch_order');
+  const confirmedOrder = toolsCalled.find(
+    (t) => t.name === 'confirm_launch_order' || t.name === 'capture_subscription_lead',
+  );
   const orderRef =
-    confirmedOrder && (confirmedOrder.result as any)?.order_ref
-      ? String((confirmedOrder.result as any).order_ref)
+    confirmedOrder && ((confirmedOrder.result as any)?.order_ref || (confirmedOrder.result as any)?.ref)
+      ? String((confirmedOrder.result as any).order_ref ?? (confirmedOrder.result as any).ref)
       : undefined;
 
   return finishOutput({

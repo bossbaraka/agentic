@@ -112,11 +112,23 @@ export function normalizeWaNumber(raw: string): string {
   return d;
 }
 
+/** ذاكرة مؤقتة لمنع تكرار إرسال نفس الطلب للمدير خلال فترة وجيزة (دقيقتان) */
+const recentlyNotifiedOrders = new Map<string, number>();
+const NOTIFY_DEDUP_WINDOW_MS = 2 * 60 * 1000;
+
 /**
  * إرسال ملف طلب الإطلاق المؤكد لمدير المنصة.
  * يرسل الإشعار للمدير عبر كل القنوات المتاحة (تيليجرام + واتساب معًا).
  */
 export async function notifyManager(note: string, orderRef?: string): Promise<boolean> {
+  if (orderRef) {
+    const lastSent = recentlyNotifiedOrders.get(orderRef);
+    if (lastSent && Date.now() - lastSent < NOTIFY_DEDUP_WINDOW_MS) {
+      log.info(`ℹ️ طلب الإطلاق ${orderRef} أُرسل للمدير قبل قليل — تخطي التكرار`);
+      return true;
+    }
+  }
+
   let delivered = false;
 
   // 1) الإرسال عبر تيليجرام للمدير
@@ -158,6 +170,16 @@ export async function notifyManager(note: string, orderRef?: string): Promise<bo
       }
     } catch (err) {
       log.error(`خطأ أثناء إرسال إشعار واتساب للمدير: ${(err as Error).message}`);
+    }
+  }
+
+  if (delivered && orderRef) {
+    recentlyNotifiedOrders.set(orderRef, Date.now());
+    if (recentlyNotifiedOrders.size > 200) {
+      const now = Date.now();
+      for (const [k, v] of recentlyNotifiedOrders.entries()) {
+        if (now - v > NOTIFY_DEDUP_WINDOW_MS) recentlyNotifiedOrders.delete(k);
+      }
     }
   }
 

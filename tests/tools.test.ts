@@ -4,6 +4,7 @@ import './helpers/db.js';
 import { runTool } from '../src/agent/tools.js';
 import { bookingService } from '../src/services/bookingService.js';
 import { listBookingsAdmin } from '../src/db/repos/bookings.js';
+import { store } from '../src/lib/store.js';
 import type { ToolContext } from '../src/agent/tools-types.js';
 
 const ctx = (key = 'tg:tool-tester'): ToolContext => ({
@@ -90,4 +91,51 @@ describe('سجل الأدوات الموحّد (toolRegistry)', () => {
     const r = await runTool('create_support_ticket', { issue: '' }, ctx());
     assert.equal(r.ok, false);
   });
+
+  it('confirm_launch_order يرفض إذا كان ملف المطعم ناقصًا', async () => {
+    const testKey = 'tg:launch-tester-incomplete';
+    store.patchProfile(testKey, { full_name: 'أحمد' }); // ناقص: اسم المطعم، المدينة، الطاولات، الباقة
+    const r = await runTool('confirm_launch_order', { confirmed: true }, ctx(testKey));
+    assert.equal(r.ok, false);
+    assert.equal((r.data as any).error, 'الملف ناقص');
+    assert.ok(Array.isArray((r.data as any).missing));
+    assert.ok((r.data as any).missing.includes('restaurant_name'));
+  });
+
+  it('confirm_launch_order ينشئ الطلب ويرسل جانب notify_manager بمعلومات المطعم كاملة ويتعامل مع التأكيد المكرر', async () => {
+    const testKey = 'tg:launch-tester-complete';
+    store.patchProfile(testKey, {
+      full_name: 'خالد العمري',
+      restaurant_name: 'شاورما ستيشن',
+      city: 'الرياض',
+      tables: 15,
+      branches: 2,
+      preferred_plan: 'pro',
+    });
+
+    // 1) التأكيد لأول مرة
+    const r1 = await runTool('confirm_launch_order', { confirmed: true, notes: 'يرجى التركيز على المنيو الرقمي' }, ctx(testKey));
+    assert.equal(r1.ok, true, JSON.stringify(r1));
+    assert.ok((r1.data as any)?.order_ref?.startsWith('ORD-'));
+    const orderRef = (r1.data as any).order_ref;
+
+    // التحقق من sideEffect الخاص بتنبيه المدير
+    assert.equal(r1.sideEffect?.kind, 'notify_manager');
+    assert.equal(r1.sideEffect?.payload?.orderRef, orderRef);
+    const note = String(r1.sideEffect?.payload?.note ?? '');
+    assert.ok(note.includes('شاورما ستيشن'), 'يجب أن يحتوي على اسم المطعم');
+    assert.ok(note.includes('الرياض'), 'يجب أن يحتوي على المدينة');
+    assert.ok(note.includes('خالد العمري'), 'يجب أن يحتوي على اسم العميل');
+    assert.ok(note.includes('15'), 'يجب أن يحتوي على عدد الطاولات');
+    assert.ok(note.includes(orderRef), 'يجب أن يحتوي على رقم الطلب');
+
+    // 2) إعادة التأكيد لنفس الجلسة (duplicate: true)
+    const r2 = await runTool('confirm_launch_order', { confirmed: true }, ctx(testKey));
+    assert.equal(r2.ok, true);
+    assert.equal((r2.data as any)?.duplicate, true);
+    assert.equal((r2.data as any)?.order_ref, orderRef);
+    assert.equal(r2.sideEffect?.kind, 'notify_manager');
+    assert.equal(r2.sideEffect?.payload?.orderRef, orderRef);
+  });
 });
+

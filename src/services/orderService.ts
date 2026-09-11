@@ -45,6 +45,8 @@ export const orderService = {
   launchOrder(input: {
     contactKey: string;
     summary: string;
+    fullNote?: string;
+    ref?: string;
     payload: Record<string, unknown>;
     serviceSlug?: string;
     totalAmount?: number | null;
@@ -52,14 +54,21 @@ export const orderService = {
   }): OrderRow {
     const { user, customer } = ensureCustomer(input.contactKey, { language: input.language ?? 'ar' });
     const service = input.serviceSlug ? getService(input.serviceSlug) : undefined;
-    // ثبات: طلب إطلاق واحد نشط لكل عميل على نفس الخدمة
     const existing = listOrdersForContact(input.contactKey).find(
       (o) => o.kind === 'launch' && o.status !== 'CANCELLED' && o.service_id === (service?.id ?? null),
     );
-    if (existing) return existing;
+    const noteToSend = input.fullNote || `🚀 طلب إطلاق مؤكد ${existing ? existing.ref : ''}\n${input.summary}`;
+
+    if (existing) {
+      notifications.staffAlert('manager', noteToSend, {
+        orderRef: existing.ref, contactKey: input.contactKey,
+      });
+      return existing;
+    }
 
     const order = createOrder({
       contactKey: input.contactKey,
+      ref: input.ref,
       kind: 'launch',
       service: service ?? null,
       summary: input.summary,
@@ -70,7 +79,8 @@ export const orderService = {
       status: 'CONFIRMED',
     });
 
-    notifications.staffAlert('manager', `🚀 طلب إطلاق مؤكد ${order.ref}\n${input.summary}`, {
+    const finalNote = input.fullNote || `🚀 طلب إطلاق مؤكد ${order.ref}\n${input.summary}`;
+    notifications.staffAlert('manager', finalNote, {
       orderRef: order.ref, contactKey: input.contactKey,
     });
     audit({ actorType: 'customer', actorId: input.contactKey, action: 'order.launch_confirmed', entity: 'order', entityId: order.ref });

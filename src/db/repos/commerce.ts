@@ -19,6 +19,7 @@ export interface CreateOrderInput {
   userId?: number | null;
   customerId?: number | null;
   idempotencyKey?: string | null;
+  ref?: string;
 }
 
 export function createOrder(input: CreateOrderInput): OrderRow {
@@ -27,7 +28,7 @@ export function createOrder(input: CreateOrderInput): OrderRow {
       const dup = get<OrderRow>('SELECT * FROM orders WHERE idempotency_key = ?', [input.idempotencyKey]);
       if (dup) return dup;
     }
-    const ref = refCode('ORD');
+    const ref = input.ref?.trim() ? input.ref.trim().toUpperCase() : refCode('ORD');
     const now = Date.now();
     const r = run(
       `INSERT INTO orders
