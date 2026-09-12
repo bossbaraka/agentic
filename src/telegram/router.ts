@@ -12,6 +12,7 @@ import { handoffService } from '../services/handoffService.js';
 import { ServiceError } from '../services/errors.js';
 import { t, type UiLang } from '../lib/i18n.js';
 import { store } from '../lib/store.js';
+import { MUREEH_PLANS } from '../agent/plans.js';
 import { upsertUser, userLanguage, setUserLanguage } from '../db/repos/users.js';
 import { getService } from '../db/repos/catalog.js';
 import type { NormalizedInbound } from '../whatsapp/types.js';
@@ -91,8 +92,8 @@ export class TelegramMenuRouter {
 
   // ───────────────────────── نقاط الدخول ─────────────────────────
 
-  /** شاشة /start — يضبط لوحة المفاتيح الدائمة ويُنشئ المستخدم */
-  async start(chatId: string, name?: string, username?: string, lang?: UiLang): Promise<void> {
+  /** شاشة /start — يضبط لوحة المفاتيح الدائمة، ويدعم الربط العميق (Deep Linking) بالطلبات أو الباقات */
+  async start(chatId: string, name?: string, username?: string, lang?: UiLang, payload?: string): Promise<void> {
     const key = this.key(chatId);
     const detected = lang ?? this.lang(key);
     upsertUser(key, {
@@ -100,6 +101,48 @@ export class TelegramMenuRouter {
       username: username ?? null,
       language: detected,
     });
+
+    if (payload && payload.trim()) {
+      const cleanRef = payload.trim();
+      // 1) إذا كان مرجع طلب مؤكد (ORD- أو SUB-)
+      if (/^(ORD|SUB)-/i.test(cleanRef)) {
+        try {
+          const order = orderService.byRef(cleanRef);
+          if (order) {
+            await this.deps.send(chatId, {
+              text:
+                `📦 *تفاصيل طلبك المؤكد — ${order.ref}* ✅\n\n` +
+                menus.orderDetail(order, detected) +
+                `\n\nملفك وصل إدارة المنصة وجاري تجهيز نسختك في أقرب وقت 🚀`,
+              inline: backHomeInline(detected),
+              replyKeyboard: mainReplyKeyboard(detected),
+            });
+            return;
+          }
+        } catch {
+          // لم يتم العثور على الطلب — استمر للشاشة العادية
+        }
+      }
+
+      // 2) إذا كان اسم أو معرف باقة
+      const cleanLower = cleanRef.toLowerCase();
+      const matchedPlan = MUREEH_PLANS.find(
+        (p) => p.id === cleanLower || p.name.includes(cleanRef) || cleanRef.includes(p.name),
+      );
+      if (matchedPlan) {
+        store.patchProfile(key, { preferred_plan: matchedPlan.id });
+        await this.deps.send(chatId, {
+          text:
+            `👋 أهلاً بك! اخترت باقة *${matchedPlan.name}* (${matchedPlan.priceMonthly} ₪/شهرياً) 🚀\n\n` +
+            `${matchedPlan.tagline}\n\n` +
+            `دعنا نجهز لك نسختك الآن، اكتب لي اسم مطعمك لنبدأ فوراً! 👇`,
+          inline: homeInline(detected, this.isAdmin(chatId)),
+          replyKeyboard: mainReplyKeyboard(detected),
+        });
+        return;
+      }
+    }
+
     const firstName = (name ?? '').trim().split(/\s+/)[0];
     await this.deps.send(chatId, {
       text: menus.home(detected, firstName),
@@ -133,7 +176,9 @@ export class TelegramMenuRouter {
 
     if (!isCommand && !isLabel) return false;
     if (['start', 'home'].includes(command) || text === t(lang, 'menu.home')) {
-      await this.start(chatId, msg.contactName, msg.telegramUsername);
+      const parts = text.split(/\s+/);
+      const payload = parts.length > 1 ? parts.slice(1).join(' ').trim() : undefined;
+      await this.start(chatId, msg.contactName, msg.telegramUsername, undefined, payload);
       return true;
     }
     if (command === 'menu' || command === 'services' || text === t(lang, 'menu.services')) {

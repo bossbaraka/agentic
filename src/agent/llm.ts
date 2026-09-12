@@ -1507,8 +1507,10 @@ function mockReply(input: AgentInput, _started: number, aiStatus: 'ai_unavailabl
         orderRef: mockOrderRef,
         confirmedAt: Date.now(),
       });
+      const orderBotUrl = `https://t.me/Mureeh_order_bot?start=${mockOrderRef}`;
       parts.push(`تم تأكيد طلبك ✅ رقم الطلب: *${mockOrderRef}*`);
       parts.push('ملفك الكامل وصل *مدير المنصة* — يتواصل معك ويجهز نسختك، خلال دقائق عادة وبدون بطاقة للبدء 🚀');
+      parts.push(`📦 *لمتابعة طلبك مباشرة عبر بوت الطلبات:*\n👉 ${orderBotUrl}`);
     }
   }
 

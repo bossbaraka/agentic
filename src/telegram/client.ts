@@ -64,14 +64,16 @@ export async function tgSendText(
   body: string,
   opts: { replyTo?: string; quiet?: boolean; buttons?: { id: string; title: string }[] } = {},
 ): Promise<{ ok: boolean; messageId?: string; error?: string }> {
-  const keyboard = (opts.buttons?.length ?? 0) >= 2
+  const keyboard = (opts.buttons?.length ?? 0) >= 1
     ? {
         reply_markup: {
           inline_keyboard: [
-            opts.buttons!.slice(0, 3).map((b) => ({
-              text: b.title.slice(0, 40),
-              callback_data: (b.id || b.title).slice(0, 64),
-            })),
+            opts.buttons!.slice(0, 3).map((b) => {
+              const isUrl = (b as any).url || b.id?.startsWith('http');
+              return isUrl
+                ? { text: b.title.slice(0, 40), url: (b as any).url || b.id }
+                : { text: b.title.slice(0, 40), callback_data: (b.id || b.title).slice(0, 64) };
+            }),
           ],
         },
       }

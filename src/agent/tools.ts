@@ -485,13 +485,16 @@ const HANDLERS: Record<string, ToolHandler> = {
     if (session.launch?.status === 'confirmed' && session.launch.orderRef) {
       const existingRef = session.launch.orderRef;
       const managerNote = managerOrderMessage(finalProfile, existingRef, ctx.sessionKey);
+      const orderBotUrl = `https://t.me/Mureeh_order_bot?start=${existingRef}`;
       return {
         ok: true,
-        data: { order_ref: existingRef, duplicate: true },
+        data: { order_ref: existingRef, duplicate: true, order_bot_url: orderBotUrl },
         userMessage:
           `طلبك مسجل مسبقًا برقم *${existingRef}* ✅\n` +
           `ملفك الكامل وصل *مدير المنصة* ويتواصل معك لتجهيز نسختك في أقرب وقت 🚀\n` +
-          `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.`,
+          `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.\n\n` +
+          `📦 *لمتابعة وإدارة طلبك عبر بوت الطلبات:*\n` +
+          `👉 ${orderBotUrl}`,
         sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef: existingRef } },
       };
     }
@@ -516,6 +519,7 @@ const HANDLERS: Record<string, ToolHandler> = {
     const finalRef = order.ref;
     const summary = orderSummaryLine(finalProfile, finalRef);
     const managerNote = finalRef === proposedRef ? initialManagerNote : managerOrderMessage(finalProfile, finalRef, ctx.sessionKey);
+    const orderBotUrl = `https://t.me/Mureeh_order_bot?start=${finalRef}`;
 
     store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: finalRef, confirmedAt: Date.now() });
     bridge.patchCustomer(ctx.sessionKey, {
@@ -525,11 +529,13 @@ const HANDLERS: Record<string, ToolHandler> = {
     log.tool(`confirm_launch_order → ${finalRef}`);
     return {
       ok: true,
-      data: { order_ref: finalRef, summary },
+      data: { order_ref: finalRef, summary, order_bot_url: orderBotUrl },
       userMessage:
         `تم تأكيد طلبك ✅ رقم الطلب: *${finalRef}*\n` +
         `ملفك الكامل وصل *مدير المنصة* ويتواصل معك لتجهيز نسختك خلال دقائق عادة، وبدون بطاقة للبدء 🚀\n` +
-        `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.`,
+        `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.\n\n` +
+        `📦 *لمتابعة وإدارة طلبك عبر بوت الطلبات:*\n` +
+        `👉 ${orderBotUrl}`,
       sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef: finalRef } },
     };
   },
@@ -795,10 +801,14 @@ const HANDLERS: Record<string, ToolHandler> = {
     }
 
     store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: lead.ref, confirmedAt: Date.now() });
+    const orderBotUrl = `https://t.me/Mureeh_order_bot?start=${lead.ref}`;
     return {
       ok: true,
-      data: lead,
-      userMessage: `سجّلت طلبك ✅ الرقم: *${lead.ref}* — الفريق يتواصل معك الآن.`,
+      data: { ...lead, order_bot_url: orderBotUrl },
+      userMessage:
+        `سجّلت طلبك ✅ الرقم: *${lead.ref}* — الفريق يتواصل معك الآن.\n\n` +
+        `📦 *لمتابعة طلبك في بوت الطلبات:*\n` +
+        `👉 ${orderBotUrl}`,
       sideEffect: { kind: 'notify_manager', payload: { note: managerNote, orderRef: lead.ref } },
     };
   },

@@ -5,6 +5,7 @@ import { TelegramMenuRouter, type CallbackContext, type RouterDeps } from '../sr
 import { bookingService } from '../src/services/bookingService.js';
 import { listBookingsForContact } from '../src/db/repos/bookings.js';
 import { userLanguage } from '../src/db/repos/users.js';
+import { orderService } from '../src/services/orderService.js';
 
 interface Screen { text: string; inline?: unknown }
 const sent: Screen[] = [];
@@ -111,5 +112,22 @@ describe('موجّه قوائم تيليجرام', () => {
   it('زر غير معروف للقوائم يُعلَّم unhandled ليمر للذكاء', async () => {
     const r = await router.handleCallback(cb('100008', 'qr:something'));
     assert.equal(r?.unhandled, true);
+  });
+
+  it('/start مع مرجع طلب (deep link) يعرض تفاصيل الطلب المؤكد مباشرة', async () => {
+    const order = orderService.launchOrder({
+      contactKey: 'tg:999001',
+      summary: 'طلب باقة احترافية تجريبي',
+      payload: { restaurant_name: 'مطعم البركة' },
+    });
+    const handled = await router.handleText({
+      channel: 'tg',
+      from: 'tg:999001',
+      body: `/start ${order.ref}`,
+    } as any);
+    assert.equal(handled, true);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]!.text, new RegExp(order.ref));
+    assert.match(sent[0]!.text, /تفاصيل طلبك المؤكد/);
   });
 });
