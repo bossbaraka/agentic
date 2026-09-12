@@ -456,8 +456,28 @@ const HANDLERS: Record<string, ToolHandler> = {
 
   async confirm_launch_order(args, ctx) {
     const session = store.get(ctx.sessionKey);
-    const profile = session.profile ?? {};
-    if (args.confirmed !== true) return { ok: false, data: { error: 'لم يؤكد العميل بعد' } };
+    const profile = { ...(session.profile ?? {}) };
+
+    // دعم قيم تأكيد مرنة (boolean، نصوص، أو أرقام)
+    const isConfirmed =
+      args.confirmed === true ||
+      args.confirmed === 'true' ||
+      args.confirmed === 1 ||
+      args.confirmed === '1' ||
+      args.confirmed === 'نعم';
+    if (!isConfirmed) return { ok: false, data: { error: 'لم يؤكد العميل بعد' } };
+
+    // سد نقص الاسم إذا كان متوفراً في اسم الجلسة (تيليجرام/واتساب)
+    if (!profile.full_name?.trim() && session.name?.trim()) {
+      profile.full_name = session.name.trim();
+      store.patchProfile(ctx.sessionKey, { full_name: profile.full_name });
+    }
+    // باقة افتراضية إذا لم تُحدد
+    if (!profile.preferred_plan) {
+      profile.preferred_plan = 'pro';
+      store.patchProfile(ctx.sessionKey, { preferred_plan: 'pro' });
+    }
+
     if (!isProfileReady(profile)) {
       return { ok: false, data: { error: 'الملف ناقص', missing: missingRequired(profile), next_question: nextQuestion(profile) } };
     }
@@ -480,10 +500,13 @@ const HANDLERS: Record<string, ToolHandler> = {
     }
 
     const proposedRef = `ORD-${uid('').slice(-6).toUpperCase()}`;
+    const initialManagerNote = managerOrderMessage(finalProfile, proposedRef, ctx.sessionKey);
+
     const order = orderService.launchOrder({
       contactKey: ctx.sessionKey,
       ref: proposedRef,
       summary: orderSummaryLine(finalProfile, proposedRef),
+      fullNote: initialManagerNote,
       payload: { ...finalProfile },
       serviceSlug: finalProfile.preferred_plan ?? undefined,
       totalAmount: getPlan((finalProfile.preferred_plan ?? 'pro') as 'starter' | 'pro' | 'enterprise').priceMonthly,
@@ -492,7 +515,7 @@ const HANDLERS: Record<string, ToolHandler> = {
 
     const finalRef = order.ref;
     const summary = orderSummaryLine(finalProfile, finalRef);
-    const managerNote = managerOrderMessage(finalProfile, finalRef, ctx.sessionKey);
+    const managerNote = finalRef === proposedRef ? initialManagerNote : managerOrderMessage(finalProfile, finalRef, ctx.sessionKey);
 
     store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: finalRef, confirmedAt: Date.now() });
     bridge.patchCustomer(ctx.sessionKey, {
@@ -754,9 +777,24 @@ const HANDLERS: Record<string, ToolHandler> = {
       tables: typeof lead.tables === 'number' && lead.tables > 0 ? lead.tables : undefined,
       preferred_plan: ['starter', 'pro', 'enterprise'].includes(lead.preferred_plan) ? lead.preferred_plan as RestaurantProfile['preferred_plan'] : undefined,
     });
-    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: lead.ref, confirmedAt: Date.now() });
     const profile = store.get(ctx.sessionKey).profile ?? {};
     const managerNote = managerOrderMessage(profile, lead.ref, ctx.sessionKey);
+
+    try {
+      orderService.launchOrder({
+        contactKey: ctx.sessionKey,
+        ref: lead.ref,
+        summary: orderSummaryLine(profile, lead.ref),
+        fullNote: managerNote,
+        payload: { ...profile, ...lead },
+        serviceSlug: profile.preferred_plan ?? undefined,
+        language: uiLang(ctx),
+      });
+    } catch (err) {
+      log.warn(`capture_subscription_lead: فشل حفظ الطلب في SQLite: ${(err as Error).message}`);
+    }
+
+    store.patchLaunch(ctx.sessionKey, { status: 'confirmed', orderRef: lead.ref, confirmedAt: Date.now() });
     return {
       ok: true,
       data: lead,

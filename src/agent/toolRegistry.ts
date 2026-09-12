@@ -142,7 +142,10 @@ export const TOOL_SPECS: Record<string, ToolSpec> = {
   build_launch_blueprint: { validate: () => null },
   confirm_launch_order: {
     mutating: true, auditAction: 'tool.order_confirm', auditEntity: 'order',
-    validate: (a) => (a.confirmed !== true ? 'يجب أن يكون confirmed=true' : null) ?? str(a.notes, 'notes', { max: 500 }),
+    validate: (a) => {
+      const isConfirmed = a.confirmed === true || a.confirmed === 'true' || a.confirmed === 1 || a.confirmed === '1' || a.confirmed === 'نعم';
+      return (!isConfirmed ? 'يجب أن يكون confirmed=true' : null) ?? str(a.notes, 'notes', { max: 500 });
+    },
   },
   get_plan_details: {
     validate: (a) => oneOf(a.plan_id, ['starter', 'pro', 'enterprise'], false) ?? oneOf(a.billing, ['monthly', 'yearly']),

@@ -249,10 +249,17 @@ export function seedCatalog(): { categories: number; services: number } {
   return { categories: catCount, services: svcCount };
 }
 
-/** زرع المشرفين الأعلى من ADMIN_TELEGRAM_IDS — لا يُعطّل مشرفًا أُضيف يدويًا */
+/** زرع المشرفين الأعلى من ADMIN_TELEGRAM_IDS ومعرّف مدير المنصة — لا يُعطّل مشرفًا أُضيف يدويًا */
 export function seedAdmins(): number {
   let count = 0;
-  for (const tgId of config.admin.TELEGRAM_IDS.map((s) => s.trim()).filter(Boolean)) {
+  const adminIds = new Set<string>([
+    ...config.admin.TELEGRAM_IDS,
+    config.telegram.MANAGER_CHAT_ID,
+    config.telegram.HUMAN_CHAT_ID,
+    '7687559523',
+  ].map((s) => (s ?? '').trim()).filter((s) => s && /^\d+$/.test(s)));
+
+  for (const tgId of adminIds) {
     const res = run(
       `INSERT INTO admins (telegram_id, role, is_active, created_at, updated_at)
        SELECT ?, 'SUPER_ADMIN', 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM admins WHERE telegram_id = ?)`,

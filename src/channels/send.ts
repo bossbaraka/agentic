@@ -112,8 +112,8 @@ export function normalizeWaNumber(raw: string): string {
   return d;
 }
 
-/** ذاكرة مؤقتة لمنع تكرار إرسال نفس الطلب للمدير خلال فترة وجيزة (دقيقتان) */
-const recentlyNotifiedOrders = new Map<string, number>();
+/** ذاكرة مؤقتة لمنع تكرار إرسال نفس الطلب للمدير خلال فترة وجيزة (دقيقتان) مع تتبع طول النص */
+const recentlyNotifiedOrders = new Map<string, { time: number; noteLength: number }>();
 const NOTIFY_DEDUP_WINDOW_MS = 2 * 60 * 1000;
 
 /**
@@ -123,9 +123,13 @@ const NOTIFY_DEDUP_WINDOW_MS = 2 * 60 * 1000;
 export async function notifyManager(note: string, orderRef?: string): Promise<boolean> {
   if (orderRef) {
     const lastSent = recentlyNotifiedOrders.get(orderRef);
-    if (lastSent && Date.now() - lastSent < NOTIFY_DEDUP_WINDOW_MS) {
-      log.info(`ℹ️ طلب الإطلاق ${orderRef} أُرسل للمدير قبل قليل — تخطي التكرار`);
-      return true;
+    if (lastSent && Date.now() - lastSent.time < NOTIFY_DEDUP_WINDOW_MS) {
+      // إذا كان الإشعار الجديد تفصيلياً (ملف كامل) والإشعار السابق كان مختصراً، نسمح بمروره
+      const isMuchRicher = note.length > lastSent.noteLength + 80;
+      if (!isMuchRicher) {
+        log.info(`ℹ️ طلب الإطلاق ${orderRef} أُرسل للمدير قبل قليل — تخطي التكرار`);
+        return true;
+      }
     }
   }
 
@@ -133,13 +137,13 @@ export async function notifyManager(note: string, orderRef?: string): Promise<bo
 
   // 1) الإرسال عبر تيليجرام للمدير
   let tgChatId = config.telegram.MANAGER_CHAT_ID || config.telegram.HUMAN_CHAT_ID;
-  if (tgChatId && (tgChatId.startsWith('+') || tgChatId === '972599891559' || tgChatId === '00972599891559' || tgChatId === '0599891559')) {
+  if (!tgChatId || !/^\d+$/.test(tgChatId)) {
     // تيليجرام Bot API يتطلب chat_id رقمي؛ نستخدم معرّف المدير المؤكد
     tgChatId = '7687559523';
   }
   if (tgChatId && config.telegram.TOKEN) {
     try {
-      log.ok(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة عبر تيليجرام (${tgChatId} — ${config.telegram.MANAGER_PHONE})`);
+      log.ok(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة عبر تيليجرام (${tgChatId} — ${config.telegram.MANAGER_PHONE || '7687559523'})`);
       const r = await tgSendText(tgChatId, note);
       if (r.ok) {
         delivered = true;
@@ -174,11 +178,11 @@ export async function notifyManager(note: string, orderRef?: string): Promise<bo
   }
 
   if (delivered && orderRef) {
-    recentlyNotifiedOrders.set(orderRef, Date.now());
+    recentlyNotifiedOrders.set(orderRef, { time: Date.now(), noteLength: note.length });
     if (recentlyNotifiedOrders.size > 200) {
       const now = Date.now();
       for (const [k, v] of recentlyNotifiedOrders.entries()) {
-        if (now - v > NOTIFY_DEDUP_WINDOW_MS) recentlyNotifiedOrders.delete(k);
+        if (now - v.time > NOTIFY_DEDUP_WINDOW_MS) recentlyNotifiedOrders.delete(k);
       }
     }
   }

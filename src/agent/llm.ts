@@ -6,7 +6,8 @@ import type { MediaPart } from '../types.js';
 import { TOOL_DECLARATIONS, runTool, type ToolContext, type ToolResult } from './tools.js';
 import { store } from '../lib/store.js';
 import { getPlan, MUREEH_PLANS, perTableMonthly, recommendPlan, type PlanId } from './plans.js';
-import { buildBlueprintText, managerOrderMessage, planIdFromText } from './onboarding.js';
+import { buildBlueprintText, managerOrderMessage, orderSummaryLine, planIdFromText } from './onboarding.js';
+import { orderService } from '../services/orderService.js';
 import { availability, formatAvailabilityText, nextAvailableDays } from './bookings.js';
 import { detectPainPoints } from './intelligence/painPoints.js';
 import {
@@ -1475,10 +1476,25 @@ function mockReply(input: AgentInput, _started: number, aiStatus: 'ai_unavailabl
         preferred_plan: plan,
         whatsapp_number: input.toolContext.sessionKey.startsWith('tg:') ? undefined : input.toolContext.sessionKey,
       };
+      const note = managerOrderMessage(profile, mockOrderRef, input.toolContext.sessionKey);
+      try {
+        const order = orderService.launchOrder({
+          contactKey: input.toolContext.sessionKey,
+          ref: mockOrderRef,
+          summary: orderSummaryLine(profile, mockOrderRef),
+          fullNote: note,
+          payload: { ...profile },
+          serviceSlug: plan,
+          totalAmount: getPlan(plan).priceMonthly,
+        });
+        mockOrderRef = order.ref;
+      } catch (err) {
+        log.warn(`mockReply: تعذر حفظ الطلب في SQLite: ${(err as Error).message}`);
+      }
       mockSideEffects = [{
         kind: 'notify_manager',
         payload: {
-          note: managerOrderMessage(profile, mockOrderRef, input.toolContext.sessionKey),
+          note,
           orderRef: mockOrderRef,
         },
         tool: 'mock_confirm',
