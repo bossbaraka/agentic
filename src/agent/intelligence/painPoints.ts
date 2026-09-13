@@ -125,6 +125,46 @@ const RULES: PainRule[] = [
       /multiple (?:branches|locations)|chain of restaurants/i,
     ],
   },
+  {
+    pain: 'no_website',
+    solution: 'website',
+    qualificationQuestion: 'الموقع لعرض النشاط، ولا لحجز أو طلب أونلاين؟',
+    patterns: [
+      /(?:ما عندي موقع|بدون موقع|محتاج موقع|بدي موقع|ابي موقع|موقع قديم|الموقع ضعيف|الموقع بطيء)/i,
+      /(?:ما حد يلاقينا|ما بطلع جوجل|ما في صفحه)/i,
+      /no website|need a (?:website|site)|outdated (?:website|site)/i,
+    ],
+  },
+  {
+    pain: 'missed_messages',
+    solution: 'whatsapp_agent',
+    qualificationQuestion: 'تقريبًا كم محادثة توصلكم باليوم، وأي قناة أكثر: واتساب ولا إنستغرام؟',
+    patterns: [
+      /(?:واتساب|الواتس|رسائل).{0,25}(?:ما نرد|ما برد|ما بلحق|بتتراكم|متراكمه|بالليل|ضايعه|ما نلحق)/i,
+      /(?:الرسائل|الدرشه|الدرشات).{0,20}(?:كثيره|ما نرد|متراكمه)/i,
+      /missed (?:messages|chats)|whatsapp.{0,20}(?:unanswered|overwhelmed)/i,
+    ],
+  },
+  {
+    pain: 'social_chaos',
+    solution: 'social',
+    qualificationQuestion: 'أي منصات نركّز عليها أولًا، وكم منشور تبي بالشهر؟',
+    patterns: [
+      /(?:انستغرام|انستا|تيك توك|سوشال|التواصل).{0,25}(?:ما ننشر|واقف|فوضى|فوضه|ما حد يدير|محتوى ضعيف)/i,
+      /(?:ما عندي وقت).{0,20}(?:انستا|سوشال|محتوى)/i,
+      /social media.{0,20}(?:mess|chaos|no time)/i,
+    ],
+  },
+  {
+    pain: 'no_booking_system',
+    solution: 'booking_system',
+    qualificationQuestion: 'الحجوزات لمواعيد خدمة ولا لطاولات/شاليهات؟',
+    patterns: [
+      /(?:الحجز|الحجوزات|المواعيد).{0,25}(?:ورقه|واتساب|بتتعارض|مزدوج|تنسى|فوضى|فوضه|يدوي)/i,
+      /(?:حجزين بنفس|حجز مزدوج|نسينا موعد)/i,
+      /double book|no booking system|appointments on whatsapp/i,
+    ],
+  },
 ];
 
 /**
@@ -160,4 +200,8 @@ export const PAIN_LABELS_AR: Record<PainPoint, string> = {
   table_management: 'فوضى إدارة الطاولات',
   customer_experience: 'تجربة زبائن ضعيفة',
   multi_branch: 'إدارة فروع متعددة',
+  no_website: 'لا موقع / حضور ضعيف أونلاين',
+  missed_messages: 'رسائل واتساب بلا رد',
+  social_chaos: 'منصات تواصل بلا إدارة',
+  no_booking_system: 'حجوزات يدوية أو متعارضة',
 };

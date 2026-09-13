@@ -278,7 +278,7 @@ export async function sendTemplate(
 
 /** إرسال تنبيه للموظف البشري عند التحويل */
 export async function notifyHumanAgent(sessionKey: string, customerName: string, lastMessage: string, reason?: string): Promise<void> {
-  const agent = config.whatsapp.HUMAN_AGENT_ID;
+  const agent = (config.whatsapp.HUMAN_AGENT_ID || config.whatsapp.MANAGER_NUMBER || '97059349809').replace(/[^\d]/g, '');
   if (!agent) return;
 
   const text =

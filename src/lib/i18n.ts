@@ -17,7 +17,7 @@ const AR: Dict = {
   'menu.about': 'ℹ️ عن مُريح',
   // الرئيسية
   'home.title': '🏠 *الرئيسية — منصة مُريح*',
-  'home.subtitle': 'اختر ما تريد من الأزرار بالأسفل، أو اكتب لي طلبك مباشرة وأنا أفهمك.',
+  'home.subtitle': 'منيو QR، شاشة مطبخ، كاشير، وخدمات رقمية — اكتب طلبك أو اختر من الأزرار.',
   'home.services': '🛎️ تصفّح الخدمات',
   'home.book': '📅 احجز موعدًا',
   'home.bookings': '📅 حجوزاتي',
@@ -103,7 +103,7 @@ const EN: Dict = {
   'menu.support': '💬 Support',
   'menu.about': 'ℹ️ About',
   'home.title': '🏠 *Home — MUREEH*',
-  'home.subtitle': 'Pick an option below, or just type your request and I’ll understand it.',
+  'home.subtitle': 'QR menu, kitchen screen, POS, and digital services — type your request or pick below.',
   'home.services': '🛎️ Browse services',
   'home.book': '📅 Book an appointment',
   'home.bookings': '📅 My bookings',

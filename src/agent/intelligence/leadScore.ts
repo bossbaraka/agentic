@@ -126,6 +126,7 @@ export function signalsFromIntent(intent: Intent): string[] {
     case 'purchase_intent': return ['purchase_intent'];
     case 'booking': return ['requested_booking'];
     case 'restaurant_qualification': return ['business_identified'];
+    case 'service_information': return ['asked_recommendation'];
     case 'unrelated': return ['unrelated_topic'];
     default: return [];
   }

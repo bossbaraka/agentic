@@ -91,6 +91,7 @@ export function advanceStage(current: SalesStage, ctx: StageContext): SalesStage
       return deepen(current, 'CONSIDERATION');
     case 'recommendation':
     case 'feature_question':
+    case 'service_information':
       return deepen(current, 'SOLUTION_MAPPING');
     case 'restaurant_qualification':
       return deepen(current, 'QUALIFICATION');

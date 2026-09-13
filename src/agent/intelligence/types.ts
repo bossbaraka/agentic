@@ -75,12 +75,16 @@ export type PainPoint =
   | 'peak_crowding'
   | 'table_management'
   | 'customer_experience'
-  | 'multi_branch';
+  | 'multi_branch'
+  | 'no_website'
+  | 'missed_messages'
+  | 'social_chaos'
+  | 'no_booking_system';
 
 export interface PainPointHit {
   pain: PainPoint;
   /** الحل المرتبط من قدرات المنصة (مصطلح داخلي — لا يُعرض للعميل كما هو) */
-  solution: 'qr_menu' | 'waiter_call' | 'kds' | 'pos' | 'analytics' | 'multi_branch' | 'waiter_requests';
+  solution: 'qr_menu' | 'waiter_call' | 'kds' | 'pos' | 'analytics' | 'multi_branch' | 'waiter_requests' | 'website' | 'whatsapp_agent' | 'social' | 'booking_system';
   /** سؤال التأهيل المنطقي التالي لهذا الألم */
   qualificationQuestion: string;
 }

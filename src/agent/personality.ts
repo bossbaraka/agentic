@@ -109,8 +109,15 @@ export function fallbackQuickReplies(intent?: string, profile?: RestaurantProfil
       }
       return [
         { id: 'qr:prices', title: 'الأسعار والباقات' },
+        { id: 'qr:digital', title: 'خدمات رقمية' },
         { id: 'qr:recommend', title: 'أنصحني بباقة' },
-        { id: 'qr:activate', title: 'أبدأ التفعيل' },
+      ];
+    case 'استفسار_خدمات':
+    case 'خدمة_رقمية':
+      return [
+        { id: 'qr:website', title: 'موقع إلكتروني' },
+        { id: 'qr:whatsapp', title: 'وكيل واتساب' },
+        { id: 'qr:booking-sys', title: 'نظام حجوزات' },
       ];
     case 'استفسار_أسعار':
     case 'استفسار_باقات':
@@ -199,6 +206,7 @@ function buttonKeywords(b: QuickReply): string[] {
   if (/prices|starter|pro|enterprise/.test(id) || /باق|سعر|أسعار|أساسية|احترافية|مؤسسات|300|550|850/.test(t)) words.push('باق', 'سعر', 'أسعار', 'أساسية', 'احترافية', 'مؤسسات');
   if (/activate/.test(id) || /تفعيل|اشتر|ابدأ|أبدأ|نبدأ/.test(t)) words.push('تفعيل', 'اشتر', 'ابدأ', 'نبدأ', 'أجهّز');
   if (/recommend/.test(id) || /أنصح|الأنسب/.test(t)) words.push('أنصح', 'أنسب', 'طاولة');
+  if (/digital|website|whatsapp|booking-sys/.test(id) || /رقمي|موقع|واتساب|حجوزات/.test(t)) words.push('رقمي', 'موقع', 'واتساب', 'حجوزات', 'خدم');
   if (/yearly/.test(id) || /سنوي|توفير/.test(t)) words.push('سنوي', 'توفير');
   if (/human/.test(id) || /موظف|بشري/.test(t)) words.push('موظف', 'بشري', 'فريق');
   return words;
@@ -264,11 +272,11 @@ export function coherentQuickReplies(
 export function pickWarmFallbackReply(seed = Date.now()): { text: string; buttons: QuickReply[] } {
   const variants: { text: string; buttons: QuickReply[] }[] = [
     {
-      text: 'وصلتني رسالتك 👍 عشان أخدمك بأسرع وقت: تبي *شرح الباقات والأسعار*، ولا *أحسب لك الأنسب* حسب طاولاتك؟',
+      text: 'وصلتني رسالتك 👍 عشان أخدمك بأسرع وقت: تبي *باقات تشغيل المطعم*، ولا *خدمة رقمية* (موقع / واتساب / حجوزات)؟',
       buttons: [
         { id: 'qr:prices', title: 'الأسعار والباقات' },
+        { id: 'qr:digital', title: 'خدمات رقمية' },
         { id: 'qr:recommend', title: 'أنصحني بباقة' },
-        { id: 'qr:activate', title: 'أبدأ التفعيل' },
       ],
     },
     {

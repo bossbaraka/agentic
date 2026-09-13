@@ -101,6 +101,18 @@ describe('مصنّف النية الحتمي', () => {
   it('تحية + سؤال = السؤال يتقدم', () => {
     assert.equal(classifyIntent('هلا، بكم الباقات؟').intent, 'pricing');
   });
+
+  it('سؤال عن خدمات المنصة', () => {
+    assert.equal(classifyIntent('شو خدماتكم؟').intent, 'product_information');
+  });
+
+  it('طلب موقع إلكتروني', () => {
+    assert.equal(classifyIntent('بدي موقع لمطعمي').intent, 'service_information');
+  });
+
+  it('طلب وكيل واتساب', () => {
+    assert.equal(classifyIntent('في عندكم بوت واتساب؟').intent, 'service_information');
+  });
 });
 
 describe('نقاط الألم', () => {
@@ -128,6 +140,14 @@ describe('نقاط الألم', () => {
 
   it('بلا ألم = قائمة فارغة', () => {
     assert.equal(detectPainPoints('شكرا جزيلا').length, 0);
+  });
+
+  it('بدي موقع → no_website', () => {
+    assert.equal(detectPainPoints('بدي موقع')[0]!.pain, 'no_website');
+  });
+
+  it('واتساب ما نرد → missed_messages', () => {
+    assert.equal(detectPainPoints('رسائل الواتساب ما نرد عليها بالليل')[0]!.pain, 'missed_messages');
   });
 });
 

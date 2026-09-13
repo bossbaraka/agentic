@@ -180,17 +180,17 @@ export const menus = {
         'MUREEH is a cloud platform for restaurants and cafés (QR menu, live kitchen display, POS, analytics), plus a digital-services studio: websites, AI agents, WhatsApp automation, booking systems and custom solutions.',
         '',
         `⏰ Activation-team hours: ${formatAvailabilityText('en')}`,
-        '💬 Sales & support: +972 59 891 559 (Telegram / WhatsApp)',
+        '💬 WhatsApp: +970 593 498 09 · Telegram: +972 599 891 559',
         '🤖 I answer 24/7; human follow-up is during working hours.',
       ].join('\n');
     }
     return [
       t(lang, 'about.title'),
       '',
-      'منصة *مُريح* نظام سحابي متكامل للمطاعم والمقاهي (منيو QR، شاشة مطبخ حية، كاشير POS، تحليلات)، بالإضافة إلى استوديو خدمات رقمية: مواقع إلكترونية، وكلاء ذكاء اصطناعي، أتمتة واتساب، أنظمة حجوزات، وحلول مخصصة.',
+      'منصة *مُريح* منظومة سحابية للمطاعم والمقاهي (منيو QR، شاشة مطبخ حية، كاشير POS، تحليلات) — الموقع: mureehmenu.com — بالإضافة إلى استوديو خدمات رقمية: مواقع، وكلاء ذكاء، واتساب رسمي، أنظمة حجوزات، وحلول مخصصة.',
       '',
       `⏰ ساعات عمل فريق التفعيل: ${formatAvailabilityText('ar')}`,
-      '💬 المبيعات والدعم: +972 59 891 559 (تيليجرام / واتساب)',
+      '💬 واتساب: +970 593 498 09 · تيليجرام: +972 599 891 559',
       '🤖 أرد على مدار الساعة، والمتابعة البشرية خلال ساعات العمل.',
     ].join('\n');
   },

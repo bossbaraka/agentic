@@ -395,7 +395,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         data: { working_hours: formatAvailabilityText('en'), timezone: config.booking.TIMEZONE },
         userMessage: [
           '*MUREEH* — a cloud platform for restaurants and cafés (QR menu, live kitchen screen, POS, analytics) plus custom digital services.',
-          '💬 Sales & support on Telegram/WhatsApp: +972 599 891 559',
+          '💬 WhatsApp: +970 593 498 09 · Telegram: +972 599 891 559',
           `⏰ Activation-team hours: ${formatAvailabilityText('en')}`,
           '🤖 I reply 24/7; human follow-up is during working hours.',
         ].join('\n'),
@@ -405,8 +405,9 @@ const HANDLERS: Record<string, ToolHandler> = {
       ok: true,
       data: { working_hours: formatAvailabilityText('ar'), timezone: config.booking.TIMEZONE },
       userMessage: [
-        '*منصة مُريح* — نظام إدارة مطاعم ومقاهٍ سحابي (منيو QR، شاشة مطبخ حية، كاشير، تحليلات) + خدمات رقمية مخصصة.',
-        '💬 المبيعات والدعم: +972 599 891 559 (تيليجرام/واتساب)',
+        '*منصة مُريح* — منظومة سحابية للمطاعم (منيو QR، شاشة مطبخ حية، كاشير، تحليلات) + استوديو خدمات رقمية (مواقع، واتساب، حجوزات، وكلاء ذكاء).',
+        '🌐 الموقع: https://mureehmenu.com/',
+        '💬 واتساب: +970 593 498 09 · تيليجرام: +972 599 891 559',
         `⏰ ساعات عمل فريق الحجز والتفعيل: ${formatAvailabilityText('ar')}`,
         '🤖 أرد عليك 24/7، والمتابعة البشرية خلال ساعات العمل.',
       ].join('\n'),
@@ -491,7 +492,7 @@ const HANDLERS: Record<string, ToolHandler> = {
         data: { order_ref: existingRef, duplicate: true, order_bot_url: orderBotUrl },
         userMessage:
           `طلبك مسجل مسبقًا برقم *${existingRef}* ✅\n` +
-          `ملفك الكامل وصل *مدير المنصة* ويتواصل معك لتجهيز نسختك في أقرب وقت 🚀\n` +
+          `ملفك الكامل عند مدير المنصة على واتساب *+970 593 498 09* (وتيليجرام *+972 599 891 559*) ويتواصل معك في أقرب وقت 🚀\n` +
           `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.\n\n` +
           `📦 *لمتابعة وإدارة طلبك عبر بوت الطلبات:*\n` +
           `👉 ${orderBotUrl}`,
@@ -532,7 +533,7 @@ const HANDLERS: Record<string, ToolHandler> = {
       data: { order_ref: finalRef, summary, order_bot_url: orderBotUrl },
       userMessage:
         `تم تأكيد طلبك ✅ رقم الطلب: *${finalRef}*\n` +
-        `ملفك الكامل وصل *مدير المنصة* ويتواصل معك لتجهيز نسختك خلال دقائق عادة، وبدون بطاقة للبدء 🚀\n` +
+        `ملفك الكامل تحوّل فورًا إلى واتساب المدير على *+970 593 498 09* (وتيليجرام *+972 599 891 559*) ويتواصل معك لتجهيز نسختك خلال دقائق عادة، وبدون بطاقة للبدء 🚀\n` +
         `المحادثة الآن معه مباشرة، وأنا هنا لو احتجتني بعدين.\n\n` +
         `📦 *لمتابعة وإدارة طلبك عبر بوت الطلبات:*\n` +
         `👉 ${orderBotUrl}`,

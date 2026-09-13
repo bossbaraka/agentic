@@ -2,6 +2,7 @@ import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import './helpers/db.js';
 import { runTool } from '../src/agent/tools.js';
+import { managerWhatsAppNumber, MANAGER_WHATSAPP } from '../src/channels/send.js';
 import { bookingService } from '../src/services/bookingService.js';
 import { listBookingsAdmin } from '../src/db/repos/bookings.js';
 import { store } from '../src/lib/store.js';
@@ -78,6 +79,11 @@ describe('سجل الأدوات الموحّد (toolRegistry)', () => {
     const ref = (created.data as any).ref as string;
     const r = await runTool('cancel_booking', { booking_ref: ref }, ctx('tg:tool-thief'));
     assert.equal(r.ok, false);
+  });
+
+  it('رقم واتساب المدير المعتمد لكل طلب مؤكد هو +97059349809', () => {
+    assert.equal(MANAGER_WHATSAPP, '97059349809');
+    assert.equal(managerWhatsAppNumber(), '97059349809');
   });
 
   it('get_services يرجع كتالوجًا مزروعًا من قاعدة البيانات (بلا hardcode)', async () => {

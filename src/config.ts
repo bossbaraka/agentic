@@ -117,18 +117,19 @@ export const config = {
     /** إعادة فعل (إيموجي) على رسالة العميل فور وصولها */
     AUTO_REACTION: str('AUTO_REACTION', ''),
     /** رقم/معرّف الموظف البشري للتنبيه عند التحويل */
-    HUMAN_AGENT_ID: str('HUMAN_AGENT_ID', ''),
+    HUMAN_AGENT_ID: str('HUMAN_AGENT_ID', '97059349809'),
     /**
-     * رقم مدير المنصة (واتساب، أرقام فقط) — تُرسل إليه طلبات الإطلاق
-     * المؤكدة كاملةً فور تأكيد العميل، وتُحوَّل إليه المحادثة.
+     * رقم مدير المنصة (واتساب) — تُرسل إليه كل الطلبات المؤكدة فور التأكيد.
+     * القيمة الثابتة المعتمدة: +97059349809
      */
-    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', '972599891559'),
+    MANAGER_NUMBER: str('WHATSAPP_MANAGER_NUMBER', '97059349809'),
   },
 
   /** تيليجرام — القناة البديلة/المكمّلة */
   telegram: {
     /** توكن البوت من @BotFather */
     TOKEN: str('TELEGRAM_BOT_TOKEN', ''),
+    BOT_TOKEN: str('TELEGRAM_BOT_TOKEN', ''),
     /** رابط عام نهائي (https) لو تريد وضع webhook بدل الاستطلاع الدوري */
     WEBHOOK_URL: str('TELEGRAM_WEBHOOK_URL', ''),
     /** سر تحقق إضافي في webhook (يوضع في ?secret_token=) */
