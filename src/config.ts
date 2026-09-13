@@ -230,6 +230,33 @@ export const config = {
     /** ساعات التذكير قبل الموعد (مثلاً 24 ثم 1) */
     REMINDER_HOURS: list('BOOKING_REMINDER_HOURS', ['24', '1']).map((h) => Number(h)).filter((h) => Number.isFinite(h) && h > 0),
   },
+
+  /** تكامل Mureeh Restaurant SaaS — مصدر الحقيقة للعمليات */
+  mureeh: {
+    /** رابط API الخاص بمنصة المطاعم (مثلاً https://api.mureehmenu.com/api أو http://localhost:3001/api) */
+    API_URL: str('MUREEH_API_URL', ''),
+    /** توكن خدمة للوصول بين الخدمات (service-to-service) — يفضل استخدام JWT للمستخدمين الفعليين */
+    SERVICE_TOKEN: str('MUREEH_SERVICE_TOKEN', ''),
+    /** مهلة طلبات Mureeh بالمللي ثانية */
+    TIMEOUT_MS: num('MUREEH_TIMEOUT_MS', 15_000),
+    /** عدد المحاولات عند فشل الشبكة */
+    RETRIES: num('MUREEH_RETRIES', 2),
+    /** تفعيل أدوات المطاعم (قراءة وكتابة) */
+    TOOLS_ENABLED: bool('MUREEH_TOOLS_ENABLED', true),
+    /** وضع تجريبي: استخدام بيانات وهمية بدل API حقيقي */
+    DEMO_MODE: bool('MUREEH_DEMO_MODE', true),
+  },
+
+  /** الوكيل الذكي للمطاعم — إعدادات التنفيذ */
+  agent: {
+    MAX_ITERATIONS: num('AGENT_MAX_ITERATIONS', 8),
+    MAX_TOOL_CALLS: num('AGENT_MAX_TOOL_CALLS', 12),
+    TIMEOUT_MS: num('AGENT_TIMEOUT_MS', 30_000),
+    /** تفعيل التخطيط متعدد الخطوات */
+    PLANNING_ENABLED: bool('AGENT_PLANNING_ENABLED', true),
+    /** تفعيل الكشف الاستباقي للشذوذ */
+    PROACTIVE_ENABLED: bool('AGENT_PROACTIVE_ENABLED', true),
+  },
 } as const;
 
 export type AppConfig = typeof config;

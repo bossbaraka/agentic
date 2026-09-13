@@ -38,6 +38,10 @@ import {
   type ObjectionKind,
   type SalesStage,
 } from './intelligence/index.js';
+import { classifyRestaurantIntent, isRestaurantOperationalQuery } from './intelligence/restaurantIntent.js';
+import { mureehAgent } from './mureehAgent.js';
+import { resolveContactToTenant } from '../mureeh/authz.js';
+import { addHistory } from '../mureeh/memory.js';
 import { applyResponsePolicy } from './responsePolicy.js';
 import { aiMetrics } from './qualityMetrics.js';
 import type {
@@ -259,6 +263,119 @@ export class AgentOrchestrator {
           hasKnownBusiness: Boolean(session.profile?.restaurant_name || session.profile?.tables || session.profile?.preferred_plan),
         });
         const stateForTurn: CustomerState = { ...customerState, lastIntent: analysis.intent.intent };
+
+        // ── Restaurant Intelligence routing — if operational query and Mureeh tools enabled ──
+        if (config.mureeh.TOOLS_ENABLED && isRestaurantOperationalQuery(batchText)) {
+          const mapping = resolveContactToTenant(key);
+          if (mapping || config.mureeh.DEMO_MODE) {
+            try {
+              const restIntent = classifyRestaurantIntent(batchText);
+              log.info(`🍽️ [${key}] Restaurant intent: ${restIntent.intent}:${restIntent.detail} (conf ${restIntent.confidence})`);
+              const mureehResult = await mureehAgent.execute({
+                contactKey: key,
+                message: batchText,
+                restaurantId: mapping?.restaurantId || 'demo-restaurant-1',
+                branchId: mapping?.branchId || null,
+                role: mapping?.role || 'RESTAURANT_MANAGER',
+                userId: mapping?.userId,
+                language: (session.language as 'ar' | 'en') || 'ar',
+                requestId: `req-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              });
+
+              for (const t of mureehResult.toolsCalled) {
+                this.emit({ t: 'tool', sessionKey: key, name: t.name, args: t.args, result: { ok: t.ok } });
+              }
+
+              if (mureehResult.requiresClarification) {
+                const replyText = mureehResult.responseAr;
+                const sent = await sendOutbound(key, replyText, {
+                  contextMessageId: batch[batch.length - 1]?.waId,
+                });
+                if (sent.ok) {
+                  const rec = {
+                    id: uid('out'),
+                    waId: sent.messageId,
+                    dir: 'out',
+                    type: 'text',
+                    body: replyText,
+                    createdAt: Date.now(),
+                    meta: { intent: `${mureehResult.intent.intent}:${mureehResult.intent.detail}`, engine: 'mureeh-agent' },
+                  };
+                  store.addOutbound(key, rec as any);
+                  bridge.outbound(key, replyText, { externalId: sent.messageId, meta: { intent: mureehResult.intent.detail } });
+                  this.emit({ t: 'outbound', sessionKey: key, name: session.name, message: rec as any, state: session.state });
+                }
+                addHistory(key, 'user', batchText);
+                addHistory(key, 'assistant', replyText);
+                return;
+              }
+
+              if (mureehResult.requiresApproval) {
+                const replyText = mureehResult.approvalMessage || mureehResult.responseAr;
+                const sent = await sendOutbound(key, replyText, {
+                  contextMessageId: batch[batch.length - 1]?.waId,
+                });
+                if (sent.ok) {
+                  const rec = {
+                    id: uid('out'),
+                    waId: sent.messageId,
+                    dir: 'out',
+                    type: 'text',
+                    body: replyText,
+                    createdAt: Date.now(),
+                    meta: { intent: 'approval_required', engine: 'mureeh-agent', approvalId: mureehResult.approvalId },
+                  };
+                  store.addOutbound(key, rec as any);
+                  this.emit({ t: 'outbound', sessionKey: key, name: session.name, message: rec as any, state: session.state });
+                  try {
+                    const memMod = await import('../mureeh/memory.js');
+                    const mem = memMod.getMemory(key, 'demo-restaurant-1');
+                    (mem as any).shortTerm.unresolvedClarification = {
+                      question: replyText,
+                      context: `approval:${mureehResult.approvalId}`,
+                      timestamp: Date.now(),
+                      approvalId: mureehResult.approvalId,
+                    };
+                  } catch {}
+                }
+                addHistory(key, 'user', batchText);
+                addHistory(key, 'assistant', replyText);
+                return;
+              }
+
+              const finalText = mureehResult.responseAr;
+              const sent = await sendOutbound(key, finalText, {
+                contextMessageId: batch[batch.length - 1]?.waId,
+              });
+              if (sent.ok) {
+                const rec = {
+                  id: uid('out'),
+                  waId: sent.messageId,
+                  dir: 'out',
+                  type: 'text',
+                  body: finalText,
+                  createdAt: Date.now(),
+                  meta: { intent: `${mureehResult.intent.intent}:${mureehResult.intent.detail}`, engine: 'mureeh-agent', grounded: mureehResult.grounded },
+                };
+                store.addOutbound(key, rec as any);
+                bridge.outbound(key, finalText, { externalId: sent.messageId, meta: { intent: mureehResult.intent.detail, grounded: mureehResult.grounded } });
+                this.emit({ t: 'outbound', sessionKey: key, name: session.name, message: rec as any, state: session.state });
+              }
+
+              addHistory(key, 'user', batchText);
+              addHistory(key, 'assistant', finalText);
+
+              store.recordUsage(key, { promptTokens: 0, candidatesTokens: 0, latencyMs: mureehResult.executionDurationMs, error: !!mureehResult.failureReason });
+              recordMetric('mureeh_latency_ms', { refKey: key, value: mureehResult.executionDurationMs });
+
+              this.onInsight?.({ sessionKey: key, intent: `${mureehResult.intent.intent}:${mureehResult.intent.detail}`, handoff: false });
+
+              return;
+            } catch (err) {
+              log.error(`Mureeh agent failed for ${key}: ${(err as Error).message}`);
+            }
+          }
+        }
 
         // (7) الوسائط
         const mediaByKey = new Map<string, MediaPart[]>();
