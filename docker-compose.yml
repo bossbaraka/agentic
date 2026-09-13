@@ -7,7 +7,7 @@
 services:
   bot:
     build: .
-    container_name: mureeh-agent
+    container_name: whatsapp-ai-agent
     restart: unless-stopped
     env_file: .env
     ports:

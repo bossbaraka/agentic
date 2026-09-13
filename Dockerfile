@@ -1,12 +1,10 @@
 # ═══════════════════════════════════════════════════════════════
-#  MUREEH | مُريح — صورة إنتاج
-#  البناء:   docker build -t mureeh-agent .
-#  التشغيل:  docker run -p 3000:3000 --env-file .env -v mureeh-data:/app/data mureeh-agent
-#
-#  ملاحظة: Node 22 مطلوب لقاعدة البيانات (node:sqlite المدمجة).
+#  بوت واتساب الذكي — صورة إنتاج
+#  البناء:   docker build -t whatsapp-ai-agent .
+#  التشغيل:  docker run -p 3000:3000 --env-file .env whatsapp-ai-agent
 # ═══════════════════════════════════════════════════════════════
 
-FROM node:22-slim AS base
+FROM node:20-slim AS base
 ENV NODE_ENV=production
 WORKDIR /app
 
@@ -20,7 +18,7 @@ COPY src ./src
 COPY knowledge ./knowledge
 COPY scripts ./scripts
 
-# مجلد البيانات — اربطه بـ volume دائم (قاعدة SQLite + الجلسات + الوسائط)
+# مجلد البيانات — اربطه بـ volume دائم للحفاظ على المحادثات
 RUN mkdir -p /app/data /app/data/media
 VOLUME ["/app/data"]
 
@@ -36,6 +34,6 @@ EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-# نشغّل عبر tsx (نفس نمط التشغيل المعتمد في المشروع).
-# لبديل أسرع بعد التأكد من البناء: npm run build && node dist/server.js
+# ملاحظة: نشغّل عبر tsx مباشرة (بدون خطوة بناء) لتقليل التعقيد.
+# إن أردت إقلاعًا أسرع واستهلاك ذاكرة أقل، استخدم: npm run build && node dist/server.js
 CMD ["npx", "tsx", "src/server.ts"]
