@@ -47,7 +47,7 @@ const DIGITAL: Omit<ServiceSeed, 'category'>[] = [
     name_ar: '🌐 إنشاء موقع إلكتروني',
     name_en: '🌐 Website Development',
     description_ar:
-      'موقع احترافي متجاوب مع كل الأجهزة، سريع ومهيّأ لمحركات البحث، مع لوحة تحكم لتعديل المحتوى وربط النماذج ببريدك أو واتسابك.',
+      'عميل يبحث عنك يلقى صفحة سريعة تأخذ رقمه إلى واتسابك. موقع احترافي متجاوب، مهيّأ لمحركات البحث، مع لوحة تعدّل منها المحتوى بدون مطوّر.',
     description_en:
       'A professional, responsive and SEO-ready website with a content dashboard and contact forms wired to your email or WhatsApp.',
     price: null,
@@ -68,7 +68,7 @@ const DIGITAL: Omit<ServiceSeed, 'category'>[] = [
     name_ar: '🤖 وكيل ذكاء اصطناعي',
     name_en: '🤖 AI Agent',
     description_ar:
-      'وكيل ذكي يرد على عملائك 24/7، يفهم الأسئلة، يبيع خدماتك، يحجز المواعيد، ويحوّل للحالات المعقدة لموظف بشري — مدروس على بيانات نشاطك.',
+      'يرد ويحجز ويبيع ويحوّل الحالة الصعبة لفريقك كأنهم موجودون 24/7. يُدرَّب على بيانات نشاطك بالعربية والإنجليزية، مع لوحة مراقبة حية.',
     description_en:
       'A 24/7 AI agent that answers customers, sells your services, books appointments, and hands complex cases to your human team — trained on your business data.',
     price: null,
@@ -89,7 +89,7 @@ const DIGITAL: Omit<ServiceSeed, 'category'>[] = [
     name_ar: '📱 إدارة منصات التواصل',
     name_en: '📱 Social Media Management',
     description_ar:
-      'إدارة احترافية لحساباتك: خطة محتوى شهرية، تصاميم، كتابة نصوص، جدولة نشر، ورد على التعليقات والرسائل مع تقرير أداء دوري.',
+      'المنصات تشتغل وأنت في شغلك: خطة محتوى شهرية، تصاميم ونصوص، جدولة، رد على الرسائل والتعليقات، وتقرير أداء دوري.',
     description_en:
       'Professional social media management: monthly content plan, designs, copywriting, scheduling, community replies and periodic performance reports.',
     price: null,
@@ -110,7 +110,7 @@ const DIGITAL: Omit<ServiceSeed, 'category'>[] = [
     name_ar: '💬 وكيل واتساب الذكي',
     name_en: '💬 WhatsApp AI Agent',
     description_ar:
-      'وكيل ذكي على WhatsApp Cloud API الرسمي: ردود فورية، فهم صور وملفات، حجوزات، تذاكر دعم، وتحويل ذكي لفريقك — بلا حظر وبطرق رسمية.',
+      'كل رسالة تُرد خلال ثوانٍ والليل ما يضيّع طلب. وكيل على WhatsApp Cloud API الرسمي: يفهم نصًا وصوتًا وصورًا وPDF، يحجز ويفتح تذاكر، ويحوّل المعقّد لفريقك — بلا أساليب غير رسمية.',
     description_en:
       'An AI agent on the official WhatsApp Cloud API: instant replies, media understanding, bookings, support tickets and smart handoff — fully official and safe.',
     price: null,
@@ -131,7 +131,7 @@ const DIGITAL: Omit<ServiceSeed, 'category'>[] = [
     name_ar: '📅 نظام حجوزات',
     name_en: '📅 Booking System',
     description_ar:
-      'نظام حجوزات متكامل لمواعيدك: تقويم بالتوفر الفعلي، منع الحجز المزدوج، تأكيدات وتذكيرات تلقائية، وإدارة من لوحة واحدة.',
+      'ما في حجزين على نفس الساعة، والعميل يتذكّر تلقائيًا. تقويم توفّر لحظي، منع حجز مزدوج، تأكيد وتذكير، وإدارة الحالات من لوحة واحدة.',
     description_en:
       'A complete appointment booking system: real-availability calendar, double-booking prevention, automatic confirmations and reminders, all from one dashboard.',
     price: null,
@@ -152,7 +152,7 @@ const DIGITAL: Omit<ServiceSeed, 'category'>[] = [
     name_ar: '📊 حلول رقمية مخصصة',
     name_en: '📊 Custom Digital Solutions',
     description_ar:
-      'حل مبني على احتياجك: أنظمة داخلية، أتمتة عمليات، ربط خدمات (APIs)، لوحات بيانات، أو فكرة خاصة — ندرسها ونبنيها بمواصفاتك.',
+      'نسمع العملية اليدوية التي تكلّفكم وقتًا كل أسبوع ونبني حلها: أنظمة داخلية، أتمتة، ربط APIs، لوحات بيانات، أو فكرة خاصة — النطاق والسعر بعد جلسة قصيرة.',
     description_en:
       'A solution tailored to your needs: internal tools, process automation, API integrations, dashboards, or your own idea — scoped and built to your specs.',
     price: null,

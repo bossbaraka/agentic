@@ -86,7 +86,32 @@ export async function fetchChannelMedia(
   return waFetchMedia(media);
 }
 
-/** تنبيه الموظف البشري عند التحويل/الليدات */
+/** رقم واتساب المدير — كل طلب مؤكد يُحوَّل إليه */
+export const MANAGER_WHATSAPP = '97059349809';
+/** رقم/مرجع تيليجرام المدير */
+export const MANAGER_TELEGRAM = '+972599891559';
+
+/** تطبيع رقم هاتف لصيغة واتساب (أرقام فقط بدون + أو أصفار دولية) */
+export function normalizeWaNumber(raw: string): string {
+  let d = (raw ?? '').replace(/[^\d]/g, '');
+  if (d.startsWith('00')) d = d.slice(2);
+  return d;
+}
+
+/** رقم واتساب المدير — المصدر الوحيد لتحويل الطلبات المؤكدة */
+export function managerWhatsAppNumber(): string {
+  return normalizeWaNumber(
+    config.whatsapp.MANAGER_NUMBER || config.whatsapp.HUMAN_AGENT_ID || MANAGER_WHATSAPP,
+  ) || MANAGER_WHATSAPP;
+}
+
+/** هل نملك اعتمادات كافية لإرسال واتساب للمدير (حتى لو قناة العملاء موقوفة)؟ */
+function canSendManagerWhatsApp(): boolean {
+  if (config.env.DEMO_MODE) return true;
+  return Boolean(config.whatsapp.ACCESS_TOKEN && config.whatsapp.PHONE_NUMBER_ID);
+}
+
+/** تنبيه الموظف البشري عند التحويل/الليدات — واتساب +97059349809 وتيليجرام +972599891559 */
 export async function notifyHuman(
   key: string,
   customerName: string,
@@ -98,18 +123,11 @@ export async function notifyHuman(
     await tgNotifyHuman(customerName, key, lastMessage, reason);
   }
 
-  if (!waDisabled()) {
+  if (canSendManagerWhatsApp()) {
     await waNotifyHuman(key, customerName, lastMessage, reason);
   } else if (!tgChatId) {
-    log.warn('⏸ واتساب موقوف ولا يوجد معرّف تيليجرام — تنبيه الموظف يظهر في لوحة التحكم فقط.');
+    log.warn('⏸ لا اعتمادات واتساب ولا معرّف تيليجرام — تنبيه الموظف يظهر في لوحة التحكم فقط.');
   }
-}
-
-/** تطبيع رقم هاتف لصيغة واتساب (أرقام فقط بدون + أو أصفار دولية) */
-export function normalizeWaNumber(raw: string): string {
-  let d = (raw ?? '').replace(/[^\d]/g, '');
-  if (d.startsWith('00')) d = d.slice(2);
-  return d;
 }
 
 /** ذاكرة مؤقتة لمنع تكرار إرسال نفس الطلب للمدير خلال فترة وجيزة (دقيقتان) مع تتبع طول النص */
@@ -134,6 +152,10 @@ export async function notifyManager(note: string, orderRef?: string): Promise<bo
   }
 
   let delivered = false;
+  const to = managerWhatsAppNumber();
+  const headed = note.includes('+97059349809') || note.includes('97059349809')
+    ? note
+    : `📦 *طلب مؤكد — مُريح*\n📲 واتساب المدير: +970 593 498 09\n💬 تيليجرام المدير: +972 599 891 559\n\n${note}`;
 
   // 1) الإرسال عبر تيليجرام للمدير
   let tgChatId = config.telegram.MANAGER_CHAT_ID || config.telegram.HUMAN_CHAT_ID;
@@ -144,7 +166,7 @@ export async function notifyManager(note: string, orderRef?: string): Promise<bo
   if (tgChatId && config.telegram.TOKEN) {
     try {
       log.ok(`🚀 إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة عبر تيليجرام (${tgChatId} — ${config.telegram.MANAGER_PHONE || '7687559523'})`);
-      const r = await tgSendText(tgChatId, note);
+      const r = await tgSendText(tgChatId, headed);
       if (r.ok) {
         delivered = true;
       } else {
@@ -157,23 +179,22 @@ export async function notifyManager(note: string, orderRef?: string): Promise<bo
     log.warn('⚠️ إرسال تيليجرام للمدير معطّل — تأكد من ضبط TELEGRAM_MANAGER_CHAT_ID');
   }
 
-  // 2) الإرسال عبر واتساب للمدير
-  const to = normalizeWaNumber(config.whatsapp.MANAGER_NUMBER || config.whatsapp.HUMAN_AGENT_ID);
-  if (!to) {
-    log.warn('ℹ️ لا يوجد رقم واتساب للمدير (اضبط WHATSAPP_MANAGER_NUMBER في .env)');
-  } else if (waDisabled()) {
-    log.warn('⏸ واتساب موقوف أو غير مكتمل — تم إرسال الإشعار عبر القنوات الأخرى.');
+  // 2) واتساب المدير — إجباري لكل طلب مؤكد على +97059349809
+  // لا نربطه بـ WHATSAPP_ENABLED (قناة العملاء): التنبيه الإداري يُرسل ما دامت الاعتمادات موجودة.
+  if (!canSendManagerWhatsApp()) {
+    log.warn(`⏸ تعذّر واتساب للمدير ${to} — ناقص WHATSAPP_ACCESS_TOKEN / PHONE_NUMBER_ID (الطلب سجّل في اللوحة)`);
   } else {
     try {
-      log.wa(`🚀 محاولة إرسال طلب الإطلاق ${orderRef ?? ''} لمدير المنصة على واتساب (${to.slice(0, 3)}…${to.slice(-4)})`);
-      const r = await waSendText(to, note);
+      log.wa(`🚀 تحويل الطلب المؤكد ${orderRef ?? ''} إلى واتساب المدير +${to}`);
+      const r = await waSendText(to, headed);
       if (r.ok) {
         delivered = true;
+        log.ok(`✅ وصل الطلب ${orderRef ?? ''} إلى +${to}`);
       } else {
-        log.warn(`⚠️ فشل إرسال طلب الإطلاق لواتساب المدير: ${r.error ?? '؟'}`);
+        log.warn(`⚠️ فشل إرسال الطلب المؤكد لواتساب المدير +${to}: ${r.error ?? '؟'}`);
       }
     } catch (err) {
-      log.error(`خطأ أثناء إرسال إشعار واتساب للمدير: ${(err as Error).message}`);
+      log.error(`خطأ أثناء إرسال إشعار واتساب للمدير +${to}: ${(err as Error).message}`);
     }
   }
 
