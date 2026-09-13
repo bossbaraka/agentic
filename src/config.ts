@@ -129,6 +129,7 @@ export const config = {
   telegram: {
     /** توكن البوت من @BotFather */
     TOKEN: str('TELEGRAM_BOT_TOKEN', ''),
+    BOT_TOKEN: str('TELEGRAM_BOT_TOKEN', ''),
     /** رابط عام نهائي (https) لو تريد وضع webhook بدل الاستطلاع الدوري */
     WEBHOOK_URL: str('TELEGRAM_WEBHOOK_URL', ''),
     /** سر تحقق إضافي في webhook (يوضع في ?secret_token=) */
